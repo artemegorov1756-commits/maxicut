@@ -35,6 +35,7 @@ output/
 outputs/
 render/
 renders/
+videos/
 tmp/
 temp/
 *.mp4
