@@ -12,6 +12,8 @@ exists to keep.
 from __future__ import annotations
 
 import os
+import platform
+import subprocess
 import tempfile
 import urllib.error
 import urllib.parse
@@ -153,13 +155,76 @@ def download_video(url: str, max_bytes: int) -> Path:
     return tmp_path
 
 
-def resolve_source(source: str, max_bytes: int) -> tuple[Path, bool]:
-    """Return (local path to the video, whether it is a temp file we created)."""
+#: Windows exposes each WSL distro's filesystem under one of these UNC roots.
+#: wsl.localhost is current; wsl$ is the older name kept working for back
+#: compat. Both are tried, in this order, since either can be the one a given
+#: Windows build actually shares.
+WSL_UNC_ROOTS = (r"\\wsl.localhost", r"\\wsl$")
+
+
+def _default_wsl_distro() -> str | None:
+    """Name of the WSL distro `wsl -l -v` marks as default, or None.
+
+    wsl.exe prints UTF-16LE regardless of the console's own encoding, so this
+    decodes explicitly rather than trusting subprocess's text-mode guess.
+    """
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-l", "-v"], capture_output=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.decode("utf-16-le", errors="ignore").splitlines():
+        line = line.strip()
+        if line.startswith("*"):
+            parts = line[1:].split()
+            if parts:
+                return parts[0]
+    return None
+
+
+def wsl_path_to_windows(source: str, distro: str | None = None) -> Path | None:
+    """Translate a POSIX-style WSL path (``/home/user/clip.mp4``) to the
+    Windows UNC path WSL shares it under, or None if `source` doesn't look
+    like one, WSL isn't reachable, or no file exists there.
+
+    Only fires on Windows, and only for paths starting with ``/`` - a
+    Windows-native path (``C:\\...`` or already ``\\\\wsl.localhost\\...``)
+    is left to the plain `Path(source).is_file()` check the caller already
+    does.
+    """
+    if platform.system() != "Windows" or not source.startswith("/"):
+        return None
+    resolved_distro = distro or _default_wsl_distro()
+    if not resolved_distro:
+        return None
+    tail = source.lstrip("/").replace("/", "\\")
+    for root in WSL_UNC_ROOTS:
+        candidate = Path(f"{root}\\{resolved_distro}\\{tail}")
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def resolve_source(
+    source: str, max_bytes: int, wsl_distro: str | None = None
+) -> tuple[Path, bool]:
+    """Return (local path to the video, whether it is a temp file we created).
+
+    `source` may be a Windows path, a UNC path (including one already
+    pointing at `\\\\wsl.localhost\\...`), or a POSIX WSL path such as
+    `/home/user/clip.mp4` - the latter is translated via `wsl_path_to_windows`.
+    """
     if is_url(source):
         return download_video(source, max_bytes), True
 
     path = Path(source).expanduser()
     if not path.is_file():
-        raise TitleMakerError(f"Input video not found: {path}")
+        wsl_path = wsl_path_to_windows(source, wsl_distro)
+        if wsl_path is None:
+            raise TitleMakerError(f"Input video not found: {path}")
+        path = wsl_path
     print(f"[1/5] Using local file {path}")
     return path, False

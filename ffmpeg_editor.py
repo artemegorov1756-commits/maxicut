@@ -80,9 +80,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             '  %(prog)s clip.mp4 "Same Day Delivery" --brand ups\n'
             '  %(prog)s https://example.com/clip.mp4 "Live from Berlin" -o out.mp4\n'
             '  %(prog)s clip.mp4 "Chapter One" --start 2 --duration 5 --no-box\n'
+            '  %(prog)s /home/user/videos/clip.mp4 "From WSL" (output written back to the same WSL dir)\n'
         ),
     )
-    parser.add_argument("source", help="local video path or http(s) URL")
+    parser.add_argument(
+        "source", help="local video path, http(s) URL, or a POSIX WSL path "
+        "(e.g. /home/user/clip.mp4) - resolved via the Windows \\\\wsl.localhost\\... share"
+    )
     parser.add_argument("title", help="title text to overlay")
     parser.add_argument("-o", "--output", type=Path, help="output path (default: <input>_titled.mp4); forced to .mp4")
     parser.add_argument("--font", help="path to a .ttf/.otf font file")
@@ -201,19 +205,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "h264_nvenc (GPU): p1..p7 (default: p4).",
     )
     parser.add_argument("--threads", type=int, default=None, help="encoder threads")
+    parser.add_argument(
+        "--wsl-distro", metavar="NAME",
+        help="WSL distro to resolve a POSIX source path against (e.g. /home/user/clip.mp4); "
+        "default: whichever distro 'wsl -l -v' marks as default",
+    )
     parser.add_argument("--max-download-mb", type=int, default=download.DEFAULT_MAX_DOWNLOAD_MB, metavar="MB", help="download size ceiling")
     parser.add_argument("--keep-download", action="store_true", help="keep the temporary file downloaded from a URL")
     parser.add_argument("--no-preview", action="store_true", help="do not launch ffplay when done")
     return parser.parse_args(argv)
 
 
-def default_output(source: str, is_remote: bool) -> Path:
+def default_output(source_path: Path, source: str, is_remote: bool) -> Path:
+    r"""Pick an output path next to the input: same directory, `_titled` suffix.
+
+    For a WSL source, `source_path` is already the resolved `\\wsl.localhost\...`
+    (or `\\wsl$\...`) UNC path, so the default output lands back in that same
+    WSL directory rather than the script's own CWD. Remote sources have no
+    directory of their own, so those default to the CWD as before.
+    """
     if is_remote:
         stem = Path(urllib.parse.urlparse(source).path).stem or "video"
-    else:
-        stem = Path(source).stem
-    stem = "".join(c for c in stem if c.isalnum() or c in "-_") or "video"
-    return Path(f"{stem}_titled.mp4")
+        stem = "".join(c for c in stem if c.isalnum() or c in "-_") or "video"
+        return Path(f"{stem}_titled.mp4")
+    stem = "".join(c for c in source_path.stem if c.isalnum() or c in "-_") or "video"
+    return source_path.with_name(f"{stem}_titled.mp4")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -267,9 +283,11 @@ def run(args: argparse.Namespace) -> int:
     logo_path = assets.resolve_logo(args.logo, args.no_logo, brand.logo)
     subliminal_path = assets.resolve_logo(args.subliminal_image, args.no_subliminal, brand.logo)
 
-    source_path, is_temp = download.resolve_source(args.source, args.max_download_mb * 1024 * 1024)
+    source_path, is_temp = download.resolve_source(
+        args.source, args.max_download_mb * 1024 * 1024, args.wsl_distro
+    )
 
-    output = args.output or default_output(args.source, is_temp)
+    output = args.output or default_output(source_path, args.source, is_temp)
     if output.suffix.lower() != ".mp4":
         output = output.with_suffix(".mp4")
     if output.parent != Path("."):
