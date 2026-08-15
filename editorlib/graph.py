@@ -323,8 +323,22 @@ def build(
         crop_x, crop_y = box_x - left_pad, box_y - top_pad
         crop_w, crop_h = box_w + left_pad + right_pad, box_h + top_pad + bottom_pad
 
+        # format=gbrp is load-bearing, not cosmetic: `maskedmerge` demands one
+        # shared pixel format across all three of its inputs, and ffmpeg
+        # resolves that constraint *backwards* through the graph. Without a
+        # format filter to stop it here, the gray rim mask below drags the
+        # whole branch to gray - and because this branch shares a `split` with
+        # the main video, the demand keeps climbing until it reaches the
+        # scale/pad pass, which satisfies it by emitting gray outright, turning
+        # the entire render black and white. `format` accepts any input, so it
+        # terminates that backwards walk; planar RGB then lets the mask apply
+        # identically to all three channels (see rim_gbrp).
         panel_src = g.label("panelsrc")
-        g.chain([video_for_panel], f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}:exact=1", [panel_src])
+        g.chain(
+            [video_for_panel],
+            f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}:exact=1,format=gbrp",
+            [panel_src],
+        )
 
         frosted_pad, detail_pad = g.label("frostedpad"), g.label("detailpad")
         g.chain([panel_src], "split=2", [frosted_pad, detail_pad])
@@ -337,12 +351,16 @@ def build(
         g.chain([frosted_blur], f"crop={box_w}:{box_h}:{left_pad}:{top_pad}:exact=1", [frosted])
         g.chain([detail_blur], f"crop={box_w}:{box_h}:{left_pad}:{top_pad}:exact=1", [detail])
 
+        # Matched to the panel branch's gbrp so maskedmerge's three inputs
+        # already agree. The mask PNG is single-channel, and gray -> gbrp
+        # replicates it byte-for-byte into G, B and R, so every channel is
+        # mixed by the same rim weight.
         rim_in = g.add_image_input(save_png(maps.rim_image(), "rim.png"))
-        rim_gray = g.label("rimgray")
-        g.chain([rim_in], "format=gray", [rim_gray])
+        rim_gbrp = g.label("rimgbrp")
+        g.chain([rim_in], "format=gbrp", [rim_gbrp])
 
         glass_blend = g.label("glassblend")
-        g.chain([frosted, detail, rim_gray], "maskedmerge", [glass_blend])
+        g.chain([frosted, detail, rim_gbrp], "maskedmerge", [glass_blend])
 
         tint_in = g.add_image_input(save_png(maps.tint_rgba, "tint.png"))
         tinted = g.label("tinted")
