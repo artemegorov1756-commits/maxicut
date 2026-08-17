@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pillow>=12.0",
+#     "numpy>=2.0",
+# ]
+# ///
 """Burn a liquid-glass lower-third title onto a video and render it to MP4 -
 the ffmpeg-native counterpart to video_editor.py.
 
