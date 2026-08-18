@@ -1,23 +1,16 @@
 """Everything that gets precomputed once with PIL/numpy and handed to ffmpeg
 as an input image, instead of being redrawn or resampled every frame.
 
-Three families of asset live here:
+Three families of asset live here: the title bitmap, the logo lockup
+(wordmark + accent rule, recoloured to the brand's colour), and the card
+itself.
 
-* **Text and logo bitmaps** - straight replacements for MoviePy's TextClip /
-  ImageClip. These never touched MoviePy internals in the first place (the
-  original already rendered logos with Pillow); only the text path changes,
-  from `TextClip` to `ImageDraw` directly.
-
-* **Glass panel maps** (alpha, rim, tint, wash, shadow) - these *did* change
-  meaning. The original's `GlassPanel` recomputed geometry once but then
-  *sampled the live video frame* through it every frame (frost + outward
-  refraction). Per the simplified-glass decision for this project, the
-  outward refraction (bending rim pixels to sample footage from just outside
-  the panel) is dropped; what stays "live" is the frost itself - ffmpeg's
-  `gblur` still blurs the *actual* footage under the panel every frame, via
-  the filter graph in `graph.py`. Only the shape, rim mix, tint and wash -
-  which never depended on the footage's pixels even in the original - are
-  materialised here as static PNGs.
+The card used to be the interesting one. It was a liquid-glass panel whose
+static maps - rounded-rect alpha, rim bevel, white tint, brand-coloured wash -
+were materialised here so that ffmpeg's `gblur`/`maskedmerge` could frost the
+*live* footage under it every frame. The design reference has none of that:
+the card is a flat translucent rectangle, so it is now a single solid RGBA
+image and the whole glass subgraph is gone from `graph.py`.
 """
 
 from __future__ import annotations
@@ -31,10 +24,11 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .constants import (
     BUNDLED_FONT,
-    EDGE_RATIO,
     FFMPEG_INSTALL_HINTS,
     FONT_CANDIDATES,
     LOGO_MAX_HEIGHT_RATIO,
+    LOGO_RULE_GAP_RATIO,
+    LOGO_RULE_HEIGHT_RATIO,
     SUBLIMINAL_BG,
 )
 from .download import TitleMakerError
@@ -45,7 +39,7 @@ from .download import TitleMakerError
 
 
 def resolve_font(explicit: str | None) -> str:
-    """Return a usable TrueType path."""
+    """Return a usable TrueType/OpenType path."""
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
@@ -85,7 +79,7 @@ def resolve_logo(explicit: str | None, disabled: bool, default: Path) -> Path | 
 
 
 def parse_color(text: str) -> tuple[int, int, int]:
-    """Parse an "R,G,B" triple or a "#rrggbb" hex colour."""
+    """Parse an R,G,B triple or a #rrggbb hex colour."""
     import argparse
 
     value = text.strip().lstrip("#")
@@ -111,6 +105,50 @@ def ffmpeg_install_hint() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# The card
+# --------------------------------------------------------------------------- #
+
+
+def build_card_image(
+    width: int, height: int, color: tuple[int, int, int], opacity: float
+) -> Image.Image:
+    """The title card: a flat rectangle of `color`, uniformly translucent.
+
+    Square corners and a single alpha value across the whole surface - the
+    reference has no rounding, no bevel and no gradient, so there is nothing
+    per-pixel to compute here any more.
+    """
+    alpha = int(round(min(max(opacity, 0.0), 1.0) * 255))
+    return Image.new("RGBA", (max(1, width), max(1, height)), (*color, alpha))
+
+
+def build_gradient_card_image(
+    width: int, height: int, color: tuple[int, int, int], opacity: float, power: float = 1.0
+) -> Image.Image:
+    """The "bar" style's scrim: `color` fading left-to-right from `opacity` to 0.
+
+    Every row is identical - the gradient only varies across `width` - so this
+    is the "bar" style's stand-in for `build_card_image`'s flat fill: a scrim
+    that holds solid where the caption starts, next to the accent bar, and
+    thins out to nothing by the box's right edge instead of drawing a hard
+    edge over footage. `power` > 1 keeps it darker longer before the fade
+    kicks in, since alpha follows `(1 - x/width) ** power` rather than a plain
+    linear ramp.
+    """
+    width, height = max(1, width), max(1, height)
+    peak = min(max(opacity, 0.0), 1.0) * 255
+    x = np.linspace(0.0, 1.0, width, dtype=np.float32)
+    alpha_row = np.clip((1.0 - x) ** power * peak, 0, 255).astype(np.uint8)
+    alpha = np.tile(alpha_row, (height, 1))
+    rgba = np.empty((height, width, 4), dtype=np.uint8)
+    rgba[..., 0] = color[0]
+    rgba[..., 1] = color[1]
+    rgba[..., 2] = color[2]
+    rgba[..., 3] = alpha
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+# --------------------------------------------------------------------------- #
 # Logo artwork
 # --------------------------------------------------------------------------- #
 
@@ -129,8 +167,31 @@ def load_logo_artwork(path: Path) -> Image.Image:
     return logo.crop(ink)
 
 
-def build_logo_image(path: Path, width: int, height: int, ratio: float) -> Image.Image:
-    """Load the logo and scale it for a `width` x `height` frame."""
+def tint_ink(image: Image.Image, color: tuple[int, int, int]) -> Image.Image:
+    """Repaint every pixel `color`, keeping the artwork's own alpha.
+
+    Only meaningful for a monochrome wordmark; a logo that already carries its
+    own colours is left alone by the caller (see `Brand.wordmark`).
+    """
+    flat = Image.new("RGBA", image.size, (*color, 255))
+    flat.putalpha(image.getchannel("A"))
+    return flat
+
+
+def build_logo_image(
+    path: Path,
+    width: int,
+    height: int,
+    ratio: float,
+    color: tuple[int, int, int] | None = None,
+    rule: bool = False,
+) -> Image.Image:
+    """The logo lockup, scaled for a `width` x `height` frame.
+
+    `color` recolours the artwork; `rule` adds the accent bar under it, drawn
+    the full width of the wordmark in the same colour. Both are what
+    `Brand.wordmark` decides between at the call site.
+    """
     logo = load_logo_artwork(path)
 
     logo_w = max(1, round(width * ratio))
@@ -141,7 +202,20 @@ def build_logo_image(path: Path, width: int, height: int, ratio: float) -> Image
         logo_w = max(1, round(logo_w * ceiling / logo_h))
         logo_h = ceiling
 
-    return logo.resize((logo_w, logo_h), Image.LANCZOS)
+    logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+    if color is not None:
+        logo = tint_ink(logo, color)
+    if not rule or color is None:
+        return logo
+
+    gap = max(1, round(logo_w * LOGO_RULE_GAP_RATIO))
+    rule_h = max(1, round(logo_w * LOGO_RULE_HEIGHT_RATIO))
+    lockup = Image.new("RGBA", (logo_w, logo_h + gap + rule_h), (0, 0, 0, 0))
+    lockup.alpha_composite(logo, (0, 0))
+    ImageDraw.Draw(lockup).rectangle(
+        [0, logo_h + gap, logo_w - 1, logo_h + gap + rule_h - 1], fill=(*color, 255)
+    )
+    return lockup
 
 
 def build_subliminal_frame(path: Path, width: int, height: int, ratio: float) -> Image.Image:
@@ -159,12 +233,14 @@ def build_subliminal_frame(path: Path, width: int, height: int, ratio: float) ->
 
 
 # --------------------------------------------------------------------------- #
-# Soft drop shadows (shared by text and logo)
+# Soft drop shadow - the --no-box path only, where text sits on raw footage.
+# On the card path the card itself supplies the contrast, and the reference
+# shows no halo around the glyphs.
 # --------------------------------------------------------------------------- #
 
 
 def soft_shadow_from_alpha(alpha: np.ndarray, blur: int, opacity: float) -> tuple[Image.Image, int]:
-    """A soft dark halo from an alpha mask, e.g. text or logo ink.
+    """A soft dark halo from an alpha mask, e.g. text ink.
 
     Returns (RGBA black image, padding added on every side - subtract it from
     the ink's own position to keep the two in register).
@@ -181,7 +257,7 @@ def soft_shadow_from_alpha(alpha: np.ndarray, blur: int, opacity: float) -> tupl
 
 
 # --------------------------------------------------------------------------- #
-# Text rendering (replaces MoviePy's TextClip)
+# Text rendering
 # --------------------------------------------------------------------------- #
 
 
@@ -215,14 +291,17 @@ def render_text_image(
     stroke_width: int,
     line_gap: int,
     color: tuple[int, int, int] = (255, 255, 255),
+    align: str = "left",
 ) -> Image.Image:
     """Render (possibly multi-line) `text` to an RGBA image cropped to its ink.
 
-    Replaces MoviePy's ``TextClip(method="label") + _crop_to_ink``. Drawn onto
-    a canvas padded by `_safety_margin` so PIL's own stroke bleed and
-    descenders never fall off the edge, then cropped back down - the same two
-    steps the original used, just with Pillow driving the draw directly
-    instead of through MoviePy's TextClip wrapper.
+    Drawn onto a canvas padded by `safety_margin` so Pillow's own stroke bleed
+    and descenders never fall off the edge, then cropped back down.
+
+    Note that cropping to ink means the returned image's height depends on
+    which glyphs the title happens to use; the card's height is measured from
+    font metrics instead (`textfit.text_block_height`) so it cannot jitter, and
+    the ink is centred inside it.
     """
     metrics = ImageFont.truetype(font, font_size)
     margin_x, margin_y = safety_margin(font, font_size, stroke_width)
@@ -231,7 +310,7 @@ def render_text_image(
     # Pillow's textbbox can return fractional (subpixel) coordinates; round
     # outward so the canvas is never a hair too small for its own ink.
     x0, y0, x1, y1 = probe.multiline_textbbox(
-        (0, 0), text, font=metrics, spacing=line_gap, stroke_width=stroke_width, align="center"
+        (0, 0), text, font=metrics, spacing=line_gap, stroke_width=stroke_width, align=align
     )
     x0, y0 = math.floor(x0), math.floor(y0)
     x1, y1 = math.ceil(x1), math.ceil(y1)
@@ -248,121 +327,6 @@ def render_text_image(
         stroke_width=stroke_width,
         stroke_fill=(0, 0, 0, 255) if stroke_width else None,
         spacing=line_gap,
-        align="center",
+        align=align,
     )
     return _crop_to_ink(image)
-
-
-def render_split_title_image(
-    lines: list[tuple[str, int]], font: str, line_gap_ratio: float
-) -> Image.Image:
-    """Render each `(text, font_size)` line at its own size and stack them.
-
-    Replaces `build_split_title_clip`. The only way to mix sizes within one
-    title - each size needs its own draw call - so the pieces are rendered
-    separately and composited by hand, same as the original.
-    """
-    pieces = [render_text_image(text, font, size, 0, 0) for text, size in lines]
-
-    gap = max(0, round(min(size for _, size in lines) * line_gap_ratio))
-    width = max(piece.width for piece in pieces)
-    height = sum(piece.height for piece in pieces) + gap * (len(pieces) - 1)
-
-    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    y = 0
-    for piece in pieces:
-        x = (width - piece.width) // 2
-        canvas.alpha_composite(piece, (x, y))
-        y += piece.height + gap
-    return canvas
-
-
-# --------------------------------------------------------------------------- #
-# Glass panel maps
-# --------------------------------------------------------------------------- #
-
-
-def _rounded_rect_sdf(width: int, height: int, radius: float) -> np.ndarray:
-    """Signed distance to the edge of a rounded rectangle, in pixels."""
-    xs = np.arange(width, dtype=np.float32) - (width - 1) / 2
-    ys = np.arange(height, dtype=np.float32) - (height - 1) / 2
-    px = np.abs(xs)[None, :] - (width / 2 - radius)
-    py = np.abs(ys)[:, None] - (height / 2 - radius)
-    outside = np.hypot(np.maximum(px, 0.0), np.maximum(py, 0.0))
-    inside = np.minimum(np.maximum(px, py), 0.0)
-    return outside + inside - radius
-
-
-class GlassMaps:
-    """Static per-pixel maps for one glass panel instance.
-
-    `alpha` is the panel's own rounded-rect coverage (0-1); `rim_mix` is 0 in
-    the flat middle and 1 at the bevel, used to blend a sharper (less blurred)
-    pass in near the edge; `tint_rgba` and `wash_rgba` are premultiplied-alpha
-    overlay images ffmpeg lays on top of the blurred footage with a plain
-    `overlay` filter, reproducing ``glass*(1-a) + colour*a`` without any
-    per-frame Python involved.
-    """
-
-    def __init__(
-        self,
-        box_w: int,
-        box_h: int,
-        radius: float,
-        tint: float,
-        wash: float,
-        wash_color: tuple[int, int, int],
-        wash_reach: float,
-    ) -> None:
-        self.width, self.height = box_w, box_h
-        sdf = _rounded_rect_sdf(box_w, box_h, radius)
-        self.alpha = np.clip(0.5 - sdf, 0.0, 1.0).astype(np.float32)
-
-        edge = max(2.0, min(box_w, box_h) * EDGE_RATIO)
-        rim = np.clip((sdf + edge) / edge, 0.0, 1.0).astype(np.float32)
-        self.rim_mix = rim**2
-
-        depth = np.arange(box_h, dtype=np.float32) / max(1, box_h - 1)
-        tint_map = np.clip(tint * (1.15 - 0.30 * depth), 0.0, 1.0)
-
-        ramp = np.clip(1.0 - (1.0 - depth) / wash_reach, 0.0, 1.0)
-        ramp = ramp * ramp * (3.0 - 2.0 * ramp)  # smoothstep
-        wash_map = np.clip(wash * ramp, 0.0, 1.0)
-
-        self.tint_rgba = self._flat_color_image((255, 255, 255), tint_map)
-        self.wash_rgba = self._flat_color_image(wash_color, wash_map)
-
-    def _flat_color_image(self, rgb: tuple[int, int, int], row_alpha: np.ndarray) -> Image.Image:
-        """An RGBA image of a solid colour whose alpha varies only by row."""
-        rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
-        rgba[..., 0] = rgb[0]
-        rgba[..., 1] = rgb[1]
-        rgba[..., 2] = rgb[2]
-        rgba[..., 3] = np.clip(row_alpha * 255, 0, 255).astype(np.uint8)[:, None]
-        return Image.fromarray(rgba, mode="RGBA")
-
-    def alpha_image(self) -> Image.Image:
-        return Image.fromarray(np.clip(self.alpha * 255, 0, 255).astype(np.uint8), mode="L")
-
-    def rim_image(self) -> Image.Image:
-        return Image.fromarray(np.clip(self.rim_mix * 255, 0, 255).astype(np.uint8), mode="L")
-
-    def drop_shadow(self, layers: list[tuple[float, float, float]]) -> tuple[Image.Image, int]:
-        """Two-layer elevation shadow cast by this panel's own shape.
-
-        `layers` are ``(blur, offset, opacity)`` pairs stacked the way real
-        overlapping shadows darken (``canvas += layer * (1 - canvas)``).
-        """
-        pad = max(1, int(np.ceil(max(2 * blur + offset for blur, offset, _ in layers))))
-        canvas = np.zeros((self.height + 2 * pad, self.width + 2 * pad), dtype=np.float32)
-        for blur, offset, opacity in layers:
-            top = pad + int(round(offset))
-            layer = np.zeros_like(canvas)
-            layer[top : top + self.height, pad : pad + self.width] = self.alpha
-            blurred = Image.fromarray((layer * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(blur))
-            layer = np.asarray(blurred, dtype=np.float32) / 255.0 * opacity
-            canvas += layer * (1.0 - canvas)
-
-        rgba = np.zeros((*canvas.shape, 4), dtype=np.uint8)
-        rgba[..., 3] = np.clip(canvas * 255, 0, 255).astype(np.uint8)
-        return Image.fromarray(rgba, mode="RGBA"), pad

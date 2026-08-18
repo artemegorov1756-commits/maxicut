@@ -6,19 +6,20 @@
 #     "numpy>=2.0",
 # ]
 # ///
-"""Burn a liquid-glass lower-third title onto a video and render it to MP4 -
-the ffmpeg-native counterpart to video_editor.py.
+"""Burn a lower-third title lockup onto a video and render it to MP4.
 
-Same CLI surface, same layout/text-fitting math, same brands, same
-subliminal-flash and speed-ramp behaviour. The difference is what actually
-draws the pixels: this version never imports MoviePy. Python precomputes the
-static parts (title bitmap, logo, glass-panel maps) with PIL/numpy and hands
-everything else to a single ffmpeg -filter_complex graph - see
-editorlib/graph.py for how that graph is built, and its module docstring (and
-assets.py's) for the one deliberate visual difference: the glass panel still
-frosts the *live* footage under it every frame, but no longer bends rim
-pixels outward to sample past its own edge (no refraction), by design - see
-README.md.
+Each brand picks one of two lockup styles (`Brand.style`, see
+editorlib/constants.py): a flat translucent card with the title set
+left-aligned inside it and the logo sitting directly above, or - `whatsup` -
+no card, with the title on the raw footage marked by a coloured accent bar and
+the logo pinned near the top of the frame on its own. Either way the title's
+width and type size are fixed fractions of the frame; what varies is the
+title block's height, which grows to fit however many lines (up to three) it
+wraps onto. See editorlib/constants.py, whose numbers were measured off the
+design references.
+
+Python precomputes every layer as a static PNG with PIL/numpy and hands the
+rest to a single ffmpeg -filter_complex graph - see editorlib/graph.py.
 
 Example:
     python ffmpeg_editor.py clip.mp4 "Dr. Ada Lovelace" -o titled.mp4
@@ -40,15 +41,14 @@ from pathlib import Path
 
 from editorlib import assets, download, graph, probe, render
 from editorlib.constants import (
+    BAR_FONT_RATIO,
     BRANDS,
     DEFAULT_ASPECT,
-    DEFAULT_BOX_RATIO,
     DEFAULT_BRAND,
-    DEFAULT_EMPHASIS_LINE,
-    DEFAULT_EMPHASIS_RATIO,
-    DEFAULT_GLASS_BLUR,
-    DEFAULT_GLASS_TINT,
-    DEFAULT_GLASS_WASH,
+    DEFAULT_CARD_COLOR,
+    DEFAULT_CARD_OPACITY,
+    DEFAULT_CARD_WIDTH_RATIO,
+    DEFAULT_FONT_RATIO,
     DEFAULT_LINE_GAP,
     DEFAULT_LOGO_OPACITY,
     DEFAULT_LOGO_RATIO,
@@ -59,7 +59,7 @@ from editorlib.constants import (
     DEFAULT_SUBLIMINAL_OPACITY,
     DEFAULT_SUBLIMINAL_RATIO,
     DEFAULT_TITLE_DURATION,
-    DEFAULT_TITLE_FILL,
+    MAX_TITLE_LINES,
 )
 from editorlib.download import TitleMakerError
 
@@ -78,8 +78,8 @@ def parse_aspect(text: str) -> tuple[int, int]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Overlay a liquid-glass lower-third title on a video and "
-        "render it to MP4, using ffmpeg for every video operation.",
+        description="Overlay a lower-third title lockup on a video and render "
+        "it to MP4, using ffmpeg for every video operation.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
@@ -94,75 +94,73 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "source", help="local video path, http(s) URL, or a POSIX WSL path "
         "(e.g. /home/user/clip.mp4) - resolved via the Windows \\\\wsl.localhost\\... share"
     )
-    parser.add_argument("title", help="title text to overlay")
+    parser.add_argument("title", help=f"title text to overlay (wraps onto up to {MAX_TITLE_LINES} lines)")
     parser.add_argument("-o", "--output", type=Path, help="output path (default: <input>_titled.mp4); forced to .mp4")
-    parser.add_argument("--font", help="path to a .ttf/.otf font file")
+    parser.add_argument("--font", help="path to a .ttf/.otf font file (default: the bundled Stem Medium)")
     parser.add_argument(
         "--font-ratio", type=float, default=None, metavar="R",
-        help="pin the font to this fraction of min(width, height); by default the "
-        "title is grown to fill the panel instead",
+        help="type size as a fraction of min(width, height) "
+        f"(default: {DEFAULT_FONT_RATIO} for 'card'-style brands, {BAR_FONT_RATIO} for "
+        "'bar'-style brands). The card grows to fit the text, so this sets the "
+        "size on every clip rather than varying with title length",
     )
     parser.add_argument(
         "--position", type=float, default=DEFAULT_POSITION_RATIO, metavar="R",
-        help="vertical centre of the title as a fraction of height "
-        f"(default: {DEFAULT_POSITION_RATIO}, the top of the lower third)",
+        help="vertical position of the title block's TOP edge as a fraction of "
+        f"height (default: {DEFAULT_POSITION_RATIO}); on the 'card' style the logo "
+        "lockup sits above it, on 'bar' the logo is positioned independently",
     )
     parser.add_argument(
-        "--box-ratio", type=float, default=DEFAULT_BOX_RATIO, metavar="R",
-        help=f"how much of the frame the card covers, by area (default: {DEFAULT_BOX_RATIO})",
+        "--card-width", type=float, default=DEFAULT_CARD_WIDTH_RATIO, metavar="R",
+        help=f"card width as a fraction of frame width (default: {DEFAULT_CARD_WIDTH_RATIO}); "
+        "the title wraps inside it",
     )
     parser.add_argument(
-        "--text-fill", type=float, default=DEFAULT_TITLE_FILL, metavar="R",
-        help=f"how much of the card the title spans, per axis (default: {DEFAULT_TITLE_FILL})",
+        "--card-color", type=assets.parse_color, default=DEFAULT_CARD_COLOR, metavar="RGB",
+        help="card fill colour, as R,G,B or #rrggbb (default: "
+        f"{DEFAULT_CARD_COLOR[0]},{DEFAULT_CARD_COLOR[1]},{DEFAULT_CARD_COLOR[2]})",
+    )
+    parser.add_argument(
+        "--card-opacity", type=float, default=DEFAULT_CARD_OPACITY, metavar="A",
+        help=f"how solid the card sits over the footage, 0-1 (default: {DEFAULT_CARD_OPACITY})",
     )
     parser.add_argument(
         "--line-gap", type=float, default=DEFAULT_LINE_GAP, metavar="R",
-        help=f"gap between lines, as a fraction of font size (default: {DEFAULT_LINE_GAP})",
+        help=f"leading between lines, as a fraction of font size (default: {DEFAULT_LINE_GAP})",
     )
     parser.add_argument("--no-caps", action="store_true", help="keep the title's own capitalisation")
     parser.add_argument(
-        "--emphasis-line", choices=["first", "second"], default=DEFAULT_EMPHASIS_LINE,
-        help=f"which line of a two-line title is bigger (default: {DEFAULT_EMPHASIS_LINE})",
-    )
-    parser.add_argument(
-        "--emphasis-ratio", type=float, default=DEFAULT_EMPHASIS_RATIO, metavar="X",
-        help=f"how much bigger the emphasised line is (default: {DEFAULT_EMPHASIS_RATIO:g})",
-    )
-    parser.add_argument("--no-emphasis", action="store_true", help="keep both lines of a wrapped title the same size")
-    parser.add_argument(
-        "--glass-blur", type=float, default=DEFAULT_GLASS_BLUR, metavar="R",
-        help=f"frost of the glass, as a fraction of min(width, height) (default: {DEFAULT_GLASS_BLUR})",
-    )
-    parser.add_argument(
-        "--glass-tint", type=float, default=DEFAULT_GLASS_TINT, metavar="A",
-        help=f"how much white is milked into the panel, 0-1 (default: {DEFAULT_GLASS_TINT})",
-    )
-    parser.add_argument(
-        "--glass-wash", type=float, default=DEFAULT_GLASS_WASH, metavar="A",
-        help=f"how much colour the glass picks up along its bottom edge, 0-1 (default: {DEFAULT_GLASS_WASH})",
-    )
-    parser.add_argument(
-        "--glass-color", type=assets.parse_color, default=None, metavar="RGB",
-        help="colour of that gradient, as R,G,B or #rrggbb - overrides --brand's colour",
-    )
-    parser.add_argument(
         "--brand", choices=sorted(BRANDS), default=DEFAULT_BRAND,
-        help="which logo to burn in, and the card gradient that goes with it: "
-        + ", ".join(f"{name} ({b.wash_color[0]},{b.wash_color[1]},{b.wash_color[2]})" for name, b in sorted(BRANDS.items()))
+        help="which logo to burn in, and the colour that goes with it: "
+        + ", ".join(
+            f"{name} (#{b.color[0]:02x}{b.color[1]:02x}{b.color[2]:02x})"
+            for name, b in sorted(BRANDS.items())
+        )
         + f" (default: {DEFAULT_BRAND})",
     )
-    parser.add_argument("--logo", metavar="PATH", help="image for the top-left corner (default: the --brand logo)")
+    parser.add_argument("--logo", metavar="PATH", help="image for the logo (default: the --brand logo)")
     parser.add_argument(
         "--logo-ratio", type=float, default=DEFAULT_LOGO_RATIO, metavar="R",
         help=f"logo width as a fraction of frame width (default: {DEFAULT_LOGO_RATIO})",
     )
     parser.add_argument(
         "--logo-opacity", type=float, default=DEFAULT_LOGO_OPACITY, metavar="A",
-        help=f"how solid the logo sits over the footage, 0-1 (default: {DEFAULT_LOGO_OPACITY})",
+        help=f"how solid the logo sits over the footage, 0-1 (default: {DEFAULT_LOGO_OPACITY:g})",
     )
-    parser.add_argument("--no-logo", action="store_true", help="render without the corner logo")
-    parser.add_argument("--no-subliminal", action="store_true", help="render without the hidden full-frame logo flashes")
-    parser.add_argument("--subliminal-image", metavar="PATH", help="image for the hidden flashes (default: the --brand logo)")
+    parser.add_argument(
+        "--logo-color", type=assets.parse_color, default=None, metavar="RGB",
+        help="recolour the logo to this, as R,G,B or #rrggbb - overrides --brand's colour",
+    )
+    parser.add_argument(
+        "--no-logo-color", action="store_true",
+        help="leave the logo artwork's own colours alone instead of recolouring it",
+    )
+    parser.add_argument("--no-logo", action="store_true", help="render without the logo")
+    parser.add_argument(
+        "--subliminal", action="store_true",
+        help="add hidden full-frame logo flashes (off by default; implied by --subliminal-image)",
+    )
+    parser.add_argument("--subliminal-image", metavar="PATH", help="image for the hidden flashes (default: the --brand logo); implies --subliminal")
     parser.add_argument(
         "--subliminal-at", type=float, nargs="+", default=list(DEFAULT_SUBLIMINAL_AT), metavar="R",
         help="where the flashes go, as fractions of the duration (default: "
@@ -186,14 +184,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"how long it stays up (default: {DEFAULT_TITLE_DURATION:g}s, or the whole clip if shorter)",
     )
     parser.add_argument("--fade", type=float, default=0.5, metavar="SEC", help="fade in/out length, 0 to disable (default: 0.5)")
-    parser.add_argument("--no-box", action="store_true", help="drop the glass panel, keep the outlined text only")
+    parser.add_argument("--no-box", action="store_true", help="drop the card (or the accent bar, on 'bar'-style brands), keep the outlined text only")
     parser.add_argument(
         "--speed", type=float, default=DEFAULT_SPEED, metavar="X",
-        help=f"playback speed multiplier for the whole rendered video (default: {DEFAULT_SPEED:g})",
+        help=f"playback speed multiplier for the whole rendered video (default: {DEFAULT_SPEED:g}, i.e. unchanged)",
     )
     parser.add_argument(
         "--no-speed", action="store_true",
-        help=f"disable the speed change (equivalent to --speed 1.0, overrides --speed {DEFAULT_SPEED:g})",
+        help="force the speed change off, overriding any --speed value",
     )
     parser.add_argument(
         "--aspect", type=parse_aspect, default=DEFAULT_ASPECT, metavar="W:H",
@@ -202,9 +200,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-pad", action="store_true", help="keep the source's own shape instead of padding to --aspect")
     parser.add_argument(
         "--gpu", action="store_true",
-        help="use h264_nvenc instead of libx264 for the final encode. Unlike video_editor.py's "
-        "--gpu, this has no effect on the glass panel: that always runs as ordinary ffmpeg CPU "
-        "filters (gblur/overlay/alphamerge) regardless of this flag - see README.md.",
+        help="use h264_nvenc instead of libx264 for the final encode.",
     )
     parser.add_argument(
         "--preset", default=None,
@@ -239,27 +235,37 @@ def default_output(source_path: Path, source: str, is_remote: bool) -> Path:
     return source_path.with_name(f"{stem}_titled.mp4")
 
 
+def resolve_logo_color(args, brand) -> tuple[int, int, int] | None:
+    """Which colour to repaint the logo, or None to leave the artwork alone.
+
+    An explicit --logo-color always wins; otherwise a brand recolours its logo
+    only when that logo is a monochrome wordmark, since artwork that already
+    carries its own colours would just be flattened by a repaint.
+    """
+    if args.no_logo_color:
+        return None
+    if args.logo_color is not None:
+        return args.logo_color
+    return brand.color if brand.wordmark else None
+
+
 def run(args: argparse.Namespace) -> int:
     if not args.title.strip():
         raise TitleMakerError("Title text is empty.")
-    if args.font_ratio is not None and not 0 < args.font_ratio < 1:
+    brand = BRANDS[args.brand]
+    font_ratio = args.font_ratio
+    if font_ratio is None:
+        font_ratio = BAR_FONT_RATIO if brand.style == "bar" else DEFAULT_FONT_RATIO
+    if not 0 < font_ratio < 1:
         raise TitleMakerError("--font-ratio must be between 0 and 1.")
     if not 0 < args.position < 1:
         raise TitleMakerError("--position must be between 0 and 1.")
-    if not 0 < args.box_ratio <= 1:
-        raise TitleMakerError("--box-ratio must be between 0 and 1.")
-    if not 0 < args.text_fill <= 1:
-        raise TitleMakerError("--text-fill must be between 0 and 1.")
+    if not 0 < args.card_width <= 1:
+        raise TitleMakerError("--card-width must be between 0 and 1.")
+    if not 0 <= args.card_opacity <= 1:
+        raise TitleMakerError("--card-opacity must be between 0 and 1.")
     if not 0 <= args.line_gap < 3:
         raise TitleMakerError("--line-gap must be between 0 and 3.")
-    if not 1.0 <= args.emphasis_ratio <= 5.0:
-        raise TitleMakerError("--emphasis-ratio must be between 1.0 and 5.0.")
-    if not 0 <= args.glass_blur < 1:
-        raise TitleMakerError("--glass-blur must be between 0 and 1.")
-    if not 0 <= args.glass_tint <= 1:
-        raise TitleMakerError("--glass-tint must be between 0 and 1.")
-    if not 0 <= args.glass_wash <= 1:
-        raise TitleMakerError("--glass-wash must be between 0 and 1.")
     if not 0 < args.logo_ratio <= 1:
         raise TitleMakerError("--logo-ratio must be between 0 and 1.")
     if not 0 <= args.logo_opacity <= 1:
@@ -280,15 +286,15 @@ def run(args: argparse.Namespace) -> int:
     if not args.gpu:
         print("[1/5] CPU encode (pass --gpu to try h264_nvenc instead): libx264")
     else:
-        print("[1/5] GPU encode (--gpu): h264_nvenc; glass panel still runs as CPU ffmpeg filters")
+        print("[1/5] GPU encode (--gpu): h264_nvenc")
     codec = "h264_nvenc" if gpu else "libx264"
     preset = args.preset or ("p4" if gpu else "medium")
 
-    brand = BRANDS[args.brand]
-    wash_color = args.glass_color if args.glass_color is not None else brand.wash_color
+    logo_color = resolve_logo_color(args, brand)
 
     logo_path = assets.resolve_logo(args.logo, args.no_logo, brand.logo)
-    subliminal_path = assets.resolve_logo(args.subliminal_image, args.no_subliminal, brand.logo)
+    subliminal_enabled = args.subliminal or args.subliminal_image is not None
+    subliminal_path = assets.resolve_logo(args.subliminal_image, not subliminal_enabled, brand.logo)
 
     source_path, is_temp = download.resolve_source(
         args.source, args.max_download_mb * 1024 * 1024, args.wsl_distro
@@ -315,10 +321,11 @@ def run(args: argparse.Namespace) -> int:
         duration_title = min(duration_title, remaining)
         fade = min(args.fade, duration_title / 2)
 
-        print("[3/5] Building liquid-glass lower third")
+        print("[3/5] Building the title lockup")
         print(
-            f"      brand {args.brand} - card gradient rgb{tuple(wash_color)}"
-            + ("" if args.glass_color is None else " (--glass-color override)")
+            f"      brand {args.brand} - colour "
+            + (f"rgb{tuple(logo_color)}" if logo_color is not None else "left to the artwork")
+            + ("" if args.logo_color is None else " (--logo-color override)")
         )
 
         font = assets.resolve_font(args.font)
@@ -327,7 +334,9 @@ def run(args: argparse.Namespace) -> int:
             source_path=source_path,
             info=info,
             font=font,
-            wash_color=wash_color,
+            font_ratio=font_ratio,
+            brand=brand,
+            logo_color=logo_color,
             logo_path=logo_path,
             subliminal_path=subliminal_path,
             speed=speed,

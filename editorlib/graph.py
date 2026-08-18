@@ -1,21 +1,28 @@
-"""Assemble one ffmpeg -filter_complex graph that reproduces compose_lower_third.
+"""Assemble one ffmpeg -filter_complex graph that composites the title lockup.
 
-Everything that used to be a MoviePy CompositeVideoClip layer becomes an
-ffmpeg `overlay` here; everything that used to be a per-frame numpy
-computation (the glass panel) becomes a handful of *static* PNGs plus native
-ffmpeg filters (`gblur`, `maskedmerge`, `alphamerge`) that ffmpeg itself runs
-once per frame - see `assets.py`'s module docstring for what that trades away.
+Every layer is an ffmpeg `overlay` of a *static* PNG that Python drew once
+with PIL - card, text, logo - each stacked onto its own transparent full-frame
+canvas, then overlaid on the footage. Card + text share one fade envelope and
+disappear together after `--duration`; the logo gets its own envelope that
+fades in on the same cue but never fades out, so it stays on screen for the
+rest of the video instead of vanishing with the title.
+
+This used to be considerably more involved. The card was a liquid-glass panel,
+which meant splitting the source, cropping the region under the card, running
+two `gblur` passes at different radii, blending them through a rim mask with
+`maskedmerge`, overlaying tint and wash maps, and re-attaching an alpha plane
+with `alphamerge` - all so the panel could frost the *live* footage beneath it
+every frame. The design reference has a flat translucent card, so all of that
+is gone; nothing in the graph reads the footage under the card any more.
 
 The whole graph is built in the source video's own pre-speed timeline
 (seconds and frame numbers both refer to the untouched source); `--speed` is
-applied once, at the very end, to the fully-composited stream - exactly the
-order the original used (`MultiplySpeed` on the finished `CompositeVideoClip`)
-so overlay timing never has to account for it. See `_apply_speed`.
+applied once, at the very end, to the fully-composited stream, so overlay
+timing never has to account for it.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,15 +30,24 @@ import numpy as np
 from PIL import Image
 
 from . import assets
-from .constants import DEFAULT_FONT_RATIO, GLASS_WASH_REACH, LOGO_PAD_X_RATIO, LOGO_PAD_Y_RATIO, LOGO_SHADOW_BLUR, LOGO_SHADOW_OPACITY
+from .constants import (
+    ACCENT_BAR_GAP_RATIO,
+    ACCENT_BAR_WIDTH_RATIO,
+    BAR_CARD_COLOR,
+    BAR_CARD_FADE_POWER,
+    BAR_CARD_OPACITY,
+    BAR_RIGHT_MARGIN_RATIO,
+    LOGO_CARD_GAP_RATIO,
+    LOGO_TOP_RATIO,
+    MAX_TITLE_LINES,
+    MIN_FONT_SIZE,
+)
 from .probe import VideoInfo
 from .subliminal import compute_subliminal_plan
 from .textfit import (
-    card_padding,
-    card_size,
+    card_width,
     compute_layout,
-    fit_title_to_card,
-    fit_two_line_title_to_card,
+    layout_for,
     max_text_width,
     text_block_height,
     wrap_title,
@@ -97,6 +113,23 @@ def _even(n: int) -> int:
     return n - n % 2
 
 
+def _overlay(x: int = 0, y: int = 0, enable: str | None = None) -> str:
+    """An `overlay` filter that stops when its *shortest* input runs out.
+
+    `shortest=1` is load-bearing, not a tidy-up. Every image asset here is fed
+    in with `-loop 1`, which never reaches EOF, and overlay's framesync
+    otherwise runs until *all* of its inputs are exhausted - so a single
+    looped PNG keeps the graph producing frames long after the footage has
+    ended, repeating the last frame forever. Left off, a 6-second clip encodes
+    for as long as you let it run (measured: 26+ minutes of output and still
+    going). With it, each overlay ends with whichever of its inputs is
+    genuinely finite: the transparent canvas for the lockup's own layers, and
+    the footage itself for the composite onto the main timeline.
+    """
+    filt = f"overlay={x}:{y}:format=auto:shortest=1"
+    return filt if enable is None else f"{filt}:enable='{enable}'"
+
+
 def compute_pad_geometry(
     source_w: int, source_h: int, aspect_w: int, aspect_h: int
 ) -> tuple[float, int, int, int, int, int, int]:
@@ -125,7 +158,9 @@ def build(
     source_path: Path,
     info: VideoInfo,
     font: str,
-    wash_color: tuple[int, int, int],
+    font_ratio: float,
+    brand,
+    logo_color: tuple[int, int, int] | None,
     logo_path: Path | None,
     subliminal_path: Path | None,
     speed: float,
@@ -185,203 +220,148 @@ def build(
             log.append(f"      cropping {width}x{height} -> {even_w}x{even_h} for yuv420p")
         width, height = even_w, even_h
 
-    draw_box = not args.no_box
+    video_main = cur
+    box_requested = not args.no_box
+    # "card": the flat translucent rectangle behind the title. "bar": no card -
+    # the title sits on the footage with a coloured accent bar to its left
+    # instead. Both are what --no-box removes, per brand.
+    use_card = box_requested and brand.style == "card"
+    use_bar = box_requested and brand.style == "bar"
     caps = not args.no_caps
-
-    # A copy of the untouched (post-pad) footage, split off before any
-    # overlay is drawn, so the glass panel's frost reads the same pixels the
-    # original's GlassPanel.render() did: the base video, not any overlay
-    # already stacked on top of it.
-    if draw_box:
-        video_main, video_for_panel = g.label("vmain"), g.label("vpanel")
-        g.chain([cur], "split=2", [video_main, video_for_panel])
-        cur = video_main
-    else:
-        video_main = cur
 
     log.append(f"      {width}x{height}, {info.duration:.2f}s, {info.fps:g} fps")
 
     # ----------------------------------------------------------------- #
-    # Layout + title bitmap
+    # Layout + title bitmap.
+    #
+    # The type size is fixed by --font-ratio and the card's width by
+    # --card-width; what varies is the card's *height*, which follows from how
+    # many lines the title wraps onto. Line count is measured from font metrics
+    # rather than from the rendered bitmap so that two titles wrapping to the
+    # same number of lines always get identically sized cards, whether or not
+    # their glyphs happen to carry descenders or accents.
     # ----------------------------------------------------------------- #
-    layout = compute_layout(width, height, args.font_ratio or DEFAULT_FONT_RATIO, args.line_gap)
-    stroke = 0 if draw_box else layout.stroke_width
     text_source = args.title.upper() if caps else args.title
+    align = "left" if (use_card or use_bar) else "center"
+    design_size = compute_layout(width, height, font_ratio, args.line_gap).font_size
 
-    if draw_box:
-        box_w, box_h = card_size(width, height, args.box_ratio, layout.side_margin)
-        pad_x, pad_y = card_padding(box_w, box_h, args.text_fill)
-        avail_w, avail_h = max(1, box_w - 2 * pad_x), max(1, box_h - 2 * pad_y)
-        fit_text = args.font_ratio is None
+    # The "bar" style's caption box: SIDE_MARGIN_RATIO on the left (shared
+    # with the logo above it), BAR_RIGHT_MARGIN_RATIO - not --card-width - on
+    # the right. See BAR_RIGHT_MARGIN_RATIO for why it needs its own margin
+    # rather than reusing the "card" style's width ratio.
+    bar_right_margin = max(1, round(width * BAR_RIGHT_MARGIN_RATIO))
 
-        if fit_text:
-            split = None
-            if not args.no_emphasis:
-                split = fit_two_line_title_to_card(
-                    text_source, font, avail_w, avail_h, args.line_gap,
-                    args.emphasis_ratio, args.emphasis_line, caps,
-                )
-            if split is not None:
-                size_a, size_b, line_a, line_b = split
+    def bar_card_width(side_margin: int) -> int:
+        return max(1, width - side_margin - bar_right_margin)
 
-                def draw_split(sizes: tuple[int, int]) -> Image.Image:
-                    return assets.render_split_title_image(
-                        [(line_a, sizes[0]), (line_b, sizes[1])], font, args.line_gap
-                    )
+    def lay_out(size: int):
+        """Everything about the title block that depends on the type size.
 
-                text_img = draw_split((size_a, size_b))
-                for _ in range(2):
-                    if text_img.width <= avail_w and text_img.height <= avail_h:
-                        break
-                    scale = min(avail_w / text_img.width, avail_h / text_img.height)
-                    size_a, size_b = max(1, int(size_a * scale)), max(1, int(size_b * scale))
-                    text_img = draw_split((size_a, size_b))
-                font_desc = f"{size_a}/{size_b} px"
-                final_font_size = max(size_a, size_b)
-            else:
-                font_size, wrapped = fit_title_to_card(
-                    text_source, font, avail_w, avail_h, args.line_gap, caps
-                )
-
-                def draw_uniform(size: int) -> Image.Image:
-                    return assets.render_text_image(
-                        wrapped, font, size, 0, round(size * args.line_gap)
-                    )
-
-                text_img = draw_uniform(font_size)
-                for _ in range(2):
-                    if text_img.width <= avail_w and text_img.height <= avail_h:
-                        break
-                    font_size = max(
-                        1, int(font_size * min(avail_w / text_img.width, avail_h / text_img.height))
-                    )
-                    text_img = draw_uniform(font_size)
-                font_desc = f"{font_size} px"
-                final_font_size = font_size
+        Re-derived per size rather than scaled, because the card's padding is
+        itself a fraction of the font size: shrink the type and the space it
+        has to fit into grows a little, which a single scale factor misses.
+        """
+        lay = layout_for(width, height, size, args.line_gap)
+        # A card supplies its own contrast; the bar style sits the title
+        # directly on footage (like the no-box path) so it needs the same
+        # stroke to hold up against busy backgrounds.
+        pen = 0 if use_card else lay.stroke_width
+        if use_card:
+            room = max(1, card_width(width, args.card_width, lay.side_margin) - 2 * lay.card_pad_x)
+        elif use_bar:
+            bar_w = max(1, round(lay.font_size * ACCENT_BAR_WIDTH_RATIO))
+            bar_gap = max(1, round(lay.font_size * ACCENT_BAR_GAP_RATIO))
+            room = max(1, bar_card_width(lay.side_margin) - bar_w - bar_gap)
         else:
-            margin_x, _ = assets.safety_margin(font, layout.font_size, 0)
-            wrapped = wrap_title(text_source, font, layout.font_size, 0, max(1, avail_w - 2 * margin_x))
-            text_img = assets.render_text_image(wrapped, font, layout.font_size, 0, layout.line_gap)
-            if text_img.width > avail_w or text_img.height > avail_h:
-                log.append(
-                    f"      warning: the title needs {text_img.width}x{text_img.height} px but "
-                    f"the card's interior is {avail_w}x{avail_h} px - drop --font-ratio, or raise "
-                    "--box-ratio / --text-fill"
-                )
-            font_desc = f"{layout.font_size} px"
-            final_font_size = layout.font_size
+            room = max_text_width(width, lay)
+        margin_x, _ = assets.safety_margin(font, lay.font_size, pen)
+        text = wrap_title(
+            text_source, font, lay.font_size, pen, max(1, room - 2 * margin_x), MAX_TITLE_LINES
+        )
+        return lay, pen, room, text, assets.render_text_image(
+            text, font, lay.font_size, pen, lay.line_gap, align=align
+        )
+
+    layout, stroke, avail_w, wrapped, text_img = lay_out(design_size)
+
+    shrunk_from = None
+    if text_img.width > avail_w:
+        # A title long enough to still overflow after wrapping onto
+        # MAX_TITLE_LINES lines cannot be fixed by wrapping - there are no more
+        # lines to give it - so find the largest size that does fit rather than
+        # let it run off the card. This is a fallback, not the sizing model:
+        # every title that fits at --font-ratio renders at exactly that size,
+        # which is the whole point of pinning it.
+        #
+        # Searched rather than scaled. One proportional step off the overflow
+        # ratio overshoots hard (measured: 33 px -> 15 px where 26 px fits),
+        # because a smaller size also lets the wrap redistribute words across
+        # the lines - so the widest line does not shrink linearly with the type.
+        shrunk_from = layout.font_size
+        best, lo, hi = None, MIN_FONT_SIZE, design_size
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            trial = lay_out(mid)
+            if trial[4].width <= trial[2]:
+                best, lo = trial, mid + 1
+            else:
+                hi = mid - 1
+        layout, stroke, avail_w, wrapped, text_img = best or lay_out(MIN_FONT_SIZE)
+
+    lines = wrapped.count("\n") + 1
+    pad_y = layout.card_pad_y if use_card else layout.pad_y
+    card_h = text_block_height(font, layout.font_size, lines, layout.line_gap, stroke) + 2 * pad_y
+
+    if use_card or use_bar:
+        card_w = (
+            card_width(width, args.card_width, layout.side_margin)
+            if use_card
+            else bar_card_width(layout.side_margin)
+        )
+        card_x = layout.side_margin
     else:
-        max_w = max_text_width(width, layout)
-        wrapped = wrap_title(text_source, font, layout.font_size, layout.stroke_width, max_w)
-        text_img = assets.render_text_image(
-            wrapped, font, layout.font_size, layout.stroke_width, layout.line_gap
+        card_w = min(width - 2 * layout.side_margin, text_img.width + 2 * layout.pad_x)
+        card_x = max(0, (width - card_w) // 2)
+
+    if shrunk_from is not None:
+        log.append(
+            f"      note: the title does not fit on {MAX_TITLE_LINES} lines at {shrunk_from} px, "
+            f"so the type was stepped down to {layout.font_size} px - raise --card-width to keep "
+            "it at full size"
         )
-        font_desc = f"{layout.font_size} px"
-        final_font_size = layout.font_size
-        block_h = text_block_height(
-            font, layout.font_size, wrapped.count("\n") + 1, layout.line_gap, layout.stroke_width, caps
+    if text_img.width > avail_w:
+        log.append(
+            f"      warning: the title still needs {text_img.width} px of width at the smallest "
+            f"size allowed ({MIN_FONT_SIZE} px) but the card's interior is only {avail_w} px"
         )
-        box_w = min(width - 2 * layout.side_margin, text_img.width + 2 * layout.pad_x)
-        box_h = max(block_h, text_img.height) + 2 * layout.pad_y
 
-    box_x = max(0, (width - box_w) // 2)
-    box_y = round(height * args.position - box_h / 2)
-    lowest = max(0, height - layout.bottom_margin - box_h)
-    box_y = max(0, min(box_y, lowest))
+    # --position is the card's TOP edge, not its centre. On the "card" style
+    # the logo lockup sits directly above the card, so anchoring by the centre
+    # would shove the logo up and down the frame every time the line count
+    # changed; on "bar" the logo is pinned independently (see LOGO_TOP_RATIO)
+    # but the card's top edge is still the more stable anchor of the two.
+    card_y = round(height * args.position)
+    card_y = max(0, min(card_y, max(0, height - layout.bottom_margin - card_h)))
 
-    text_x = box_x + (box_w - text_img.width) // 2
-    text_y = box_y + (box_h - text_img.height) // 2
+    bar_w = bar_gap = 0
+    if use_bar:
+        bar_w = max(1, round(layout.font_size * ACCENT_BAR_WIDTH_RATIO))
+        bar_gap = max(1, round(layout.font_size * ACCENT_BAR_GAP_RATIO))
 
-    text_alpha = np.asarray(text_img.getchannel("A"), dtype=np.float32) / 255.0
-    text_shadow_blur = max(2, round(final_font_size * 0.30))
-    text_shadow_img, text_shadow_pad = assets.soft_shadow_from_alpha(text_alpha, text_shadow_blur, 0.55)
+    if use_card:
+        text_x = card_x + layout.card_pad_x
+    elif use_bar:
+        text_x = card_x + bar_w + bar_gap
+    else:
+        text_x = card_x + (card_w - text_img.width) // 2
+    text_y = card_y + (card_h - text_img.height) // 2
 
     # ----------------------------------------------------------------- #
-    # Glass panel (maps + the live-blur ffmpeg subgraph)
-    # ----------------------------------------------------------------- #
-    panel_rgba_label = None
-    panel_shadow_img = panel_shadow_pad = None
-    if draw_box:
-        reference = min(width, height)
-        radius = min(round(box_h * 0.32), round(reference * 0.06), box_w // 2, box_h // 2)
-        maps = assets.GlassMaps(box_w, box_h, radius, args.glass_tint, args.glass_wash, wash_color, GLASS_WASH_REACH)
-        blur_radius = min(reference * args.glass_blur, min(box_w, box_h) * 0.35)
-        detail_radius = blur_radius * 0.35
-        blur_pad = max(1, math.ceil(2 * blur_radius + 2))
-
-        panel_shadow_img, panel_shadow_pad = maps.drop_shadow(
-            [
-                (max(4.0, reference * 0.045), reference * 0.012, 0.38),
-                (max(2.0, reference * 0.018), reference * 0.030, 0.32),
-            ]
-        )
-
-        left_pad = max(0, min(blur_pad, box_x))
-        right_pad = max(0, min(blur_pad, width - (box_x + box_w)))
-        top_pad = max(0, min(blur_pad, box_y))
-        bottom_pad = max(0, min(blur_pad, height - (box_y + box_h)))
-        crop_x, crop_y = box_x - left_pad, box_y - top_pad
-        crop_w, crop_h = box_w + left_pad + right_pad, box_h + top_pad + bottom_pad
-
-        # format=gbrp is load-bearing, not cosmetic: `maskedmerge` demands one
-        # shared pixel format across all three of its inputs, and ffmpeg
-        # resolves that constraint *backwards* through the graph. Without a
-        # format filter to stop it here, the gray rim mask below drags the
-        # whole branch to gray - and because this branch shares a `split` with
-        # the main video, the demand keeps climbing until it reaches the
-        # scale/pad pass, which satisfies it by emitting gray outright, turning
-        # the entire render black and white. `format` accepts any input, so it
-        # terminates that backwards walk; planar RGB then lets the mask apply
-        # identically to all three channels (see rim_gbrp).
-        panel_src = g.label("panelsrc")
-        g.chain(
-            [video_for_panel],
-            f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}:exact=1,format=gbrp",
-            [panel_src],
-        )
-
-        frosted_pad, detail_pad = g.label("frostedpad"), g.label("detailpad")
-        g.chain([panel_src], "split=2", [frosted_pad, detail_pad])
-
-        frosted_blur, detail_blur = g.label("frostedblur"), g.label("detailblur")
-        g.chain([frosted_pad], f"gblur=sigma={blur_radius:.4f}", [frosted_blur])
-        g.chain([detail_pad], f"gblur=sigma={max(0.01, detail_radius):.4f}", [detail_blur])
-
-        frosted, detail = g.label("frosted"), g.label("detail")
-        g.chain([frosted_blur], f"crop={box_w}:{box_h}:{left_pad}:{top_pad}:exact=1", [frosted])
-        g.chain([detail_blur], f"crop={box_w}:{box_h}:{left_pad}:{top_pad}:exact=1", [detail])
-
-        # Matched to the panel branch's gbrp so maskedmerge's three inputs
-        # already agree. The mask PNG is single-channel, and gray -> gbrp
-        # replicates it byte-for-byte into G, B and R, so every channel is
-        # mixed by the same rim weight.
-        rim_in = g.add_image_input(save_png(maps.rim_image(), "rim.png"))
-        rim_gbrp = g.label("rimgbrp")
-        g.chain([rim_in], "format=gbrp", [rim_gbrp])
-
-        glass_blend = g.label("glassblend")
-        g.chain([frosted, detail, rim_gbrp], "maskedmerge", [glass_blend])
-
-        tint_in = g.add_image_input(save_png(maps.tint_rgba, "tint.png"))
-        tinted = g.label("tinted")
-        g.chain([glass_blend, tint_in], "overlay=0:0:format=auto", [tinted])
-
-        wash_in = g.add_image_input(save_png(maps.wash_rgba, "wash.png"))
-        washed = g.label("washed")
-        g.chain([tinted, wash_in], "overlay=0:0:format=auto", [washed])
-
-        alpha_in = g.add_image_input(save_png(maps.alpha_image(), "panelalpha.png"))
-        alpha_gray = g.label("panelalphagray")
-        g.chain([alpha_in], "format=gray", [alpha_gray])
-
-        panel_rgba_label = g.label("panelrgba")
-        g.chain([washed, alpha_gray], "alphamerge", [panel_rgba_label])
-
-    # ----------------------------------------------------------------- #
-    # Title group: shadow + panel + text-shadow + text, composited on a
-    # transparent full-frame canvas so one fade envelope covers all of them
-    # (verified pattern: color@0.0 -> format=rgba -> chained overlays -> fade
-    # -> single overlay onto the main timeline).
+    # The lockup: card + text, composited on a transparent full-frame canvas
+    # so one fade envelope covers both (verified pattern: color@0.0 ->
+    # format=rgba -> chained overlays -> fade -> single overlay onto the main
+    # timeline). The logo gets its own canvas and fade envelope below, so it
+    # can outlast this group instead of fading out with it.
     # ----------------------------------------------------------------- #
     # format=rgba must be baked into the lavfi source string itself, not
     # applied as a later filter_complex step: -f lavfi inputs negotiate their
@@ -394,25 +374,67 @@ def build(
     )
     t = canvas
 
-    if draw_box:
-        shadow_in = g.add_image_input(save_png(panel_shadow_img, "panel_shadow.png"))
+    if use_card:
+        card_img = assets.build_card_image(card_w, card_h, args.card_color, args.card_opacity)
+        card_in = g.add_image_input(save_png(card_img, "card.png"))
         nxt = g.label("t")
-        g.chain([t, shadow_in], f"overlay={box_x - panel_shadow_pad}:{box_y - panel_shadow_pad}:format=auto", [nxt])
+        g.chain([t, card_in], _overlay(card_x, card_y), [nxt])
         t = nxt
+    else:
+        # Off the card path the text sits directly on the footage and needs
+        # its own contrast - a drop shadow behind the glyphs, plus (on "bar")
+        # a solid accent bar to their left.
+        if use_bar:
+            scrim_img = assets.build_gradient_card_image(
+                card_w, card_h, BAR_CARD_COLOR, BAR_CARD_OPACITY, BAR_CARD_FADE_POWER
+            )
+            scrim_in = g.add_image_input(save_png(scrim_img, "scrim.png"))
+            nxt = g.label("t")
+            g.chain([t, scrim_in], _overlay(card_x, card_y), [nxt])
+            t = nxt
 
+            bar_img = assets.build_card_image(bar_w, card_h, brand.color, 1.0)
+            bar_in = g.add_image_input(save_png(bar_img, "bar.png"))
+            nxt = g.label("t")
+            g.chain([t, bar_in], _overlay(card_x, card_y), [nxt])
+            t = nxt
+
+        text_alpha = np.asarray(text_img.getchannel("A"), dtype=np.float32) / 255.0
+        shadow_img, shadow_pad = assets.soft_shadow_from_alpha(
+            text_alpha, max(2, round(layout.font_size * 0.30)), 0.55
+        )
+        shadow_in = g.add_image_input(save_png(shadow_img, "text_shadow.png"))
         nxt = g.label("t")
-        g.chain([t, panel_rgba_label], f"overlay={box_x}:{box_y}:format=auto", [nxt])
+        g.chain(
+            [t, shadow_in],
+            _overlay(text_x - shadow_pad, text_y - shadow_pad),
+            [nxt],
+        )
         t = nxt
-
-    text_shadow_in = g.add_image_input(save_png(text_shadow_img, "text_shadow.png"))
-    nxt = g.label("t")
-    g.chain([t, text_shadow_in], f"overlay={text_x - text_shadow_pad}:{text_y - text_shadow_pad}:format=auto", [nxt])
-    t = nxt
 
     text_in = g.add_image_input(save_png(text_img, "text.png"))
     nxt = g.label("t")
-    g.chain([t, text_in], f"overlay={text_x}:{text_y}:format=auto", [nxt])
+    g.chain([t, text_in], _overlay(text_x, text_y), [nxt])
     t = nxt
+
+    kind = "card" if use_card else "scrim + bar + text" if use_bar else "text block"
+    log.append(
+        f"      {kind} {card_w}x{card_h} px "
+        f"at ({card_x}, {card_y}) - "
+        f"{card_w * card_h / (width * height):.0%} of frame, "
+        f"{lines} line{'s' if lines != 1 else ''} at {layout.font_size} px, "
+        f"title {text_img.width}x{text_img.height} px"
+        + (
+            f" - fill rgb{tuple(args.card_color)} @ {args.card_opacity:.0%}"
+            if use_card
+            else (
+                f" - scrim rgb{BAR_CARD_COLOR} @ {BAR_CARD_OPACITY:.0%} fading right, "
+                f"bar rgb{tuple(brand.color)} {bar_w}px wide"
+            )
+            if use_bar
+            else ""
+        )
+    )
 
     end = args.start + duration_title
     if fade > 0:
@@ -429,47 +451,81 @@ def build(
         enable = f"between(t,{args.start:.6f},{end:.6f})"
 
     after_title = g.label("aftertitle")
-    overlay_filt = "overlay=0:0:format=auto"
-    if enable:
-        overlay_filt += f":enable='{enable}'"
-    g.chain([video_main, t], overlay_filt, [after_title])
+    g.chain([video_main, t], _overlay(enable=enable), [after_title])
     cur = after_title
 
-    log.append(
-        f"      glass panel {box_w}x{box_h} px at ({box_x}, {box_y}) - "
-        f"{box_w * box_h / (width * height):.0%} of frame, "
-        f"title {text_img.width}x{text_img.height} px "
-        f"({text_img.width / box_w:.0%}x{text_img.height / box_h:.0%} of the card), "
-        f"font {font_desc}"
-    )
-
     # ----------------------------------------------------------------- #
-    # Corner logo - drawn on top of the title group, for the whole clip.
+    # Logo lockup - fades in with the title (same start/fade window) but,
+    # unlike the card and text, does NOT fade out with it: it is composited
+    # on its own transparent canvas and overlaid on top of the already-
+    # title-faded stream, so it stays on screen for the rest of the video
+    # instead of disappearing after --duration seconds. On "card" it sits
+    # flush on top of the card, left-aligned with it; on "bar" it is pinned
+    # near the top of the frame, independent of wherever the caption lands.
     # ----------------------------------------------------------------- #
     if logo_path is not None:
-        logo_img = assets.build_logo_image(logo_path, width, height, args.logo_ratio)
-        logo_rgb = np.asarray(logo_img.convert("RGB"))
-        logo_alpha = np.asarray(logo_img.getchannel("A"), dtype=np.float32) / 255.0 * args.logo_opacity
-        logo_final = Image.fromarray(
-            np.dstack([logo_rgb, np.clip(logo_alpha * 255, 0, 255).astype(np.uint8)]), mode="RGBA"
+        logo_img = assets.build_logo_image(
+            logo_path, width, height, args.logo_ratio, logo_color, brand.wordmark
         )
-        lx = layout.side_margin + round(width * LOGO_PAD_X_RATIO)
-        ly = max(0, min(layout.top_margin + round(height * LOGO_PAD_Y_RATIO), height - logo_final.height))
-        logo_shadow_img, logo_shadow_pad = assets.soft_shadow_from_alpha(
-            logo_alpha, max(2, round(logo_final.height * LOGO_SHADOW_BLUR)), LOGO_SHADOW_OPACITY
+        if args.logo_opacity < 1.0:
+            faded_alpha = (
+                np.asarray(logo_img.getchannel("A"), dtype=np.float32) * args.logo_opacity
+            )
+            logo_img = Image.fromarray(
+                np.dstack(
+                    [
+                        np.asarray(logo_img.convert("RGB")),
+                        np.clip(faded_alpha, 0, 255).astype(np.uint8),
+                    ]
+                ),
+                mode="RGBA",
+            )
+
+        if brand.style == "bar":
+            lx = layout.side_margin
+            ly = round(height * LOGO_TOP_RATIO)
+        else:
+            lx = card_x
+            ly = card_y - round(height * LOGO_CARD_GAP_RATIO) - logo_img.height
+            if ly < 0:
+                log.append(
+                    f"      note: the logo lockup needs {logo_img.height} px above the card but "
+                    f"only {card_y} px are free - pinning it to the top of the frame"
+                )
+                ly = 0
+
+        logo_canvas = g.add_lavfi_input(
+            f"color=c=black@0.0:s={width}x{height}:r={info.fps}:d={info.duration + 1.0:.3f},format=rgba"
         )
+        logo_in = g.add_image_input(save_png(logo_img, "logo.png"))
+        logo_t = g.label("logot")
+        g.chain([logo_canvas, logo_in], _overlay(lx, ly), [logo_t])
 
-        logo_shadow_in = g.add_image_input(save_png(logo_shadow_img, "logo_shadow.png"))
-        nxt = g.label("afterlogoshadow")
-        g.chain([cur, logo_shadow_in], f"overlay={lx - logo_shadow_pad}:{ly - logo_shadow_pad}:format=auto", [nxt])
-        cur = nxt
+        if fade > 0:
+            logo_faded = g.label("logofaded")
+            g.chain(
+                [logo_t],
+                f"fade=t=in:st={args.start:.6f}:d={fade:.6f}:alpha=1",
+                [logo_faded],
+            )
+            logo_t = logo_faded
+            logo_enable = None
+        else:
+            logo_enable = f"gte(t,{args.start:.6f})"
 
-        logo_in = g.add_image_input(save_png(logo_final, "logo.png"))
-        nxt = g.label("afterlogo")
-        g.chain([cur, logo_in], f"overlay={lx}:{ly}:format=auto", [nxt])
-        cur = nxt
+        after_logo = g.label("afterlogo")
+        g.chain([cur, logo_t], _overlay(enable=logo_enable), [after_logo])
+        cur = after_logo
 
-        log.append(f"      logo {logo_final.width}x{logo_final.height} px at ({lx}, {ly}) - {logo_path.name}")
+        log.append(
+            f"      logo {logo_img.width}x{logo_img.height} px at ({lx}, {ly}) - "
+            f"{logo_path.name}, visible from {args.start:.2f}s to the end of the video"
+            + (
+                f", recoloured rgb{tuple(logo_color)} with accent rule"
+                if logo_color is not None and brand.wordmark
+                else ", artwork's own colours"
+            )
+        )
 
     # ----------------------------------------------------------------- #
     # Subliminal flashes - drawn last, full-frame, single-frame-exact via
@@ -503,7 +559,7 @@ def build(
 
         for moment, (first, last) in zip(args.subliminal_at, plan.flashes):
             nxt = g.label("aftersub")
-            g.chain([cur, sub_in], f"overlay=0:0:format=auto:enable='between(n,{first},{last})'", [nxt])
+            g.chain([cur, sub_in], _overlay(enable=f"between(n,{first},{last})"), [nxt])
             cur = nxt
             log.append(f"      flash at {moment:.0%} of the clip - frames {first}-{last}")
 
