@@ -76,8 +76,13 @@ def max_text_width(width: int, layout: Layout) -> int:
 
 
 def card_width(width: int, ratio: float, side_margin: int) -> int:
-    """The card's width, fixed by the frame alone - the text wraps inside it."""
-    return max(1, min(round(width * ratio), max(1, width - 2 * side_margin)))
+    """The card's width, fixed by the frame alone - the text wraps inside it.
+
+    Clamped against the left margin only (not mirrored on the right): at the
+    default ratio the card stretches out toward the frame's right edge rather
+    than being boxed in to leave an even margin on both sides.
+    """
+    return max(1, min(round(width * ratio), width - side_margin))
 
 
 def line_height(font: str, font_size: int) -> int:

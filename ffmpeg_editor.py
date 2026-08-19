@@ -42,6 +42,7 @@ from pathlib import Path
 from editorlib import assets, download, graph, probe, render
 from editorlib.constants import (
     BAR_FONT_RATIO,
+    BAR_POSITION_RATIO,
     BRANDS,
     DEFAULT_ASPECT,
     DEFAULT_BRAND,
@@ -105,9 +106,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "size on every clip rather than varying with title length",
     )
     parser.add_argument(
-        "--position", type=float, default=DEFAULT_POSITION_RATIO, metavar="R",
+        "--position", type=float, default=None, metavar="R",
         help="vertical position of the title block's TOP edge as a fraction of "
-        f"height (default: {DEFAULT_POSITION_RATIO}); on the 'card' style the logo "
+        f"height (default: {DEFAULT_POSITION_RATIO} for 'card'-style brands, "
+        f"{BAR_POSITION_RATIO} for 'bar'-style brands); on the 'card' style the logo "
         "lockup sits above it, on 'bar' the logo is positioned independently",
     )
     parser.add_argument(
@@ -258,7 +260,10 @@ def run(args: argparse.Namespace) -> int:
         font_ratio = BAR_FONT_RATIO if brand.style == "bar" else DEFAULT_FONT_RATIO
     if not 0 < font_ratio < 1:
         raise TitleMakerError("--font-ratio must be between 0 and 1.")
-    if not 0 < args.position < 1:
+    position = args.position
+    if position is None:
+        position = BAR_POSITION_RATIO if brand.style == "bar" else DEFAULT_POSITION_RATIO
+    if not 0 < position < 1:
         raise TitleMakerError("--position must be between 0 and 1.")
     if not 0 < args.card_width <= 1:
         raise TitleMakerError("--card-width must be between 0 and 1.")
@@ -335,6 +340,7 @@ def run(args: argparse.Namespace) -> int:
             info=info,
             font=font,
             font_ratio=font_ratio,
+            position=position,
             brand=brand,
             logo_color=logo_color,
             logo_path=logo_path,

@@ -36,7 +36,7 @@ from .constants import (
     BAR_CARD_COLOR,
     BAR_CARD_FADE_POWER,
     BAR_CARD_OPACITY,
-    BAR_RIGHT_MARGIN_RATIO,
+    BAR_WIDTH_RATIO,
     LOGO_CARD_GAP_RATIO,
     LOGO_TOP_RATIO,
     MAX_TITLE_LINES,
@@ -159,6 +159,7 @@ def build(
     info: VideoInfo,
     font: str,
     font_ratio: float,
+    position: float,
     brand,
     logo_color: tuple[int, int, int] | None,
     logo_path: Path | None,
@@ -235,24 +236,25 @@ def build(
     # Layout + title bitmap.
     #
     # The type size is fixed by --font-ratio and the card's width by
-    # --card-width; what varies is the card's *height*, which follows from how
-    # many lines the title wraps onto. Line count is measured from font metrics
-    # rather than from the rendered bitmap so that two titles wrapping to the
-    # same number of lines always get identically sized cards, whether or not
-    # their glyphs happen to carry descenders or accents.
+    # --card-width; on "card" what varies is the card's *height*, which
+    # follows from how many lines the title wraps onto (measured from font
+    # metrics rather than from the rendered bitmap, so that two titles
+    # wrapping to the same number of lines always get identically sized
+    # cards, whether or not their glyphs happen to carry descenders or
+    # accents). "bar" pins its box height too - see the box_lines comment
+    # below - so a short title's text is centred inside a fixed-size box
+    # instead of the box shrinking to it.
     # ----------------------------------------------------------------- #
     text_source = args.title.upper() if caps else args.title
     align = "left" if (use_card or use_bar) else "center"
     design_size = compute_layout(width, height, font_ratio, args.line_gap).font_size
 
-    # The "bar" style's caption box: SIDE_MARGIN_RATIO on the left (shared
-    # with the logo above it), BAR_RIGHT_MARGIN_RATIO - not --card-width - on
-    # the right. See BAR_RIGHT_MARGIN_RATIO for why it needs its own margin
-    # rather than reusing the "card" style's width ratio.
-    bar_right_margin = max(1, round(width * BAR_RIGHT_MARGIN_RATIO))
-
+    # The "bar" style's caption box: starts at SIDE_MARGIN_RATIO on the left
+    # (shared with the logo above it) and stretches out to BAR_WIDTH_RATIO of
+    # the frame width - not --card-width, which is the "card" style's own,
+    # much narrower, width ratio.
     def bar_card_width(side_margin: int) -> int:
-        return max(1, width - side_margin - bar_right_margin)
+        return max(1, min(round(width * BAR_WIDTH_RATIO), width - side_margin))
 
     def lay_out(size: int):
         """Everything about the title block that depends on the type size.
@@ -310,7 +312,14 @@ def build(
 
     lines = wrapped.count("\n") + 1
     pad_y = layout.card_pad_y if use_card else layout.pad_y
-    card_h = text_block_height(font, layout.font_size, lines, layout.line_gap, stroke) + 2 * pad_y
+    # Neither "card" nor "bar" shrink-wraps its box to the actual line count:
+    # the card/scrim/accent-bar is always sized as if the title used all
+    # MAX_TITLE_LINES, so the box holds at a fixed height and a short title's
+    # text just sits centred inside it instead of shrinking the box down with
+    # it. Only the boxless --no-box path (neither use_card nor use_bar) still
+    # sizes its (invisible) block to the actual line count.
+    box_lines = MAX_TITLE_LINES if (use_card or use_bar) else lines
+    card_h = text_block_height(font, layout.font_size, box_lines, layout.line_gap, stroke) + 2 * pad_y
 
     if use_card or use_bar:
         card_w = (
@@ -340,7 +349,7 @@ def build(
     # would shove the logo up and down the frame every time the line count
     # changed; on "bar" the logo is pinned independently (see LOGO_TOP_RATIO)
     # but the card's top edge is still the more stable anchor of the two.
-    card_y = round(height * args.position)
+    card_y = round(height * position)
     card_y = max(0, min(card_y, max(0, height - layout.bottom_margin - card_h)))
 
     bar_w = bar_gap = 0

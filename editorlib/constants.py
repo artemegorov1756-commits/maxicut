@@ -20,31 +20,49 @@ from pathlib import Path
 # Title card layout
 # --------------------------------------------------------------------------- #
 
-#: Font size as a fraction of min(width, height). Reference: 33 px / 900.
-#: Unlike the old grow-to-fill behaviour this is *the* size - the card grows to
-#: fit the text, not the other way round - so type reads the same on every clip.
-DEFAULT_FONT_RATIO = 0.037
+#: Font size for the "bar" style, as a fraction of min(width, height): sized
+#: so a MAX_TITLE_LINES-line caption's box lands at roughly 15% of the
+#: frame's height (measured: 0.05 -> 152 px on a 1024 px-tall frame for a
+#: 3-line caption, i.e. ~14.8%). Still the pinned-type model - this is *the*
+#: size for every "bar" clip. The box itself is pinned too: it is always
+#: sized for MAX_TITLE_LINES lines regardless of how many the title actually
+#: uses (see graph.py), so a one- or two-line title gets the full-height box,
+#: its text centred inside it, rather than a shorter one.
+BAR_FONT_RATIO = 0.05
 
-#: Font size for the "bar" style, same fraction but bigger: sized so a typical
-#: 3-line caption's box lands at roughly 18% of the frame's height (measured:
-#: 0.06 -> 182 px on a 1024 px-tall frame for a 3-line caption, i.e. ~17.8%).
-#: Still the pinned-type model - this is *the* size for every "bar" clip, not
-#: a per-title fit - so a one- or two-line title renders a shorter box rather
-#: than being blown up to fill 18% on its own.
-BAR_FONT_RATIO = 0.06
+#: The "card" style's max type size. Kept numerically equal to BAR_FONT_RATIO
+#: by design - both styles now read at the same size - and expressed as a
+#: direct reference so the two can't quietly drift apart; split it into its
+#: own literal again if "card" ever needs a different size.
+DEFAULT_FONT_RATIO = BAR_FONT_RATIO
 
-#: Vertical position of the card's TOP edge, as a fraction of frame height.
-#: The card is anchored by its top (not its centre) because the logo lockup
-#: sits directly above it: a centred card would shove the logo around whenever
-#: the line count changed. Reference: 1122 / 1600.
-DEFAULT_POSITION_RATIO = 0.70
+#: Vertical position of the "bar" style's box TOP edge, as a fraction of
+#: frame height - anchored by its top (not its centre) because the box is
+#: pinned at a fixed height (see graph.py): a centred anchor would only
+#: matter if the box still grew or shrank with the line count, which it no
+#: longer does.
+BAR_POSITION_RATIO = 0.62
+
+#: The "card" style's position. Kept numerically equal to BAR_POSITION_RATIO
+#: by design - both styles now sit at the same height - see DEFAULT_FONT_RATIO
+#: above for why it's a direct reference rather than its own literal. Also
+#: anchored by its TOP edge: the logo lockup sits directly above the card, so
+#: a centred anchor would shove the logo around whenever the line count
+#: changed (it no longer does, but the top anchor is still the simpler one to
+#: reason about).
+DEFAULT_POSITION_RATIO = BAR_POSITION_RATIO
 
 #: Left margin shared by the card and the logo above it. Reference: 122 / 900.
 SIDE_MARGIN_RATIO = 0.136
 
-#: Card width as a fraction of frame width. Fixed - the text wraps inside it.
-#: Reference: 548 / 900.
-DEFAULT_CARD_WIDTH_RATIO = 0.609
+#: Card width as a fraction of frame width, for both "card"-style brands.
+#: Stretched out toward the frame's right edge rather than boxed in with a
+#: mirrored right margin (see textfit.card_width) - and, like the "bar"
+#: style's box, no longer shrink-wrapped to the actual line count: the card
+#: is always sized for MAX_TITLE_LINES lines (see graph.py), so a short
+#: title's text sits centred inside the full-height card instead of the card
+#: shrinking down to it.
+DEFAULT_CARD_WIDTH_RATIO = 0.80
 
 #: Inset between the text and the card's edges, as a fraction of the font size.
 #: Reference: 13 px and 28 px at a 33 px font.
@@ -185,14 +203,15 @@ ACCENT_BAR_WIDTH_RATIO = 0.24
 #: size. Reference: 15 px at a 33 px font.
 ACCENT_BAR_GAP_RATIO = 0.45
 
-#: Right-edge margin for the "bar" style's caption box, as a fraction of frame
-#: width. Unlike "card" - a discrete rectangle that reads as intentional only
-#: with an even margin on both sides, hence sharing SIDE_MARGIN_RATIO left and
-#: right - "bar" has no rectangle to balance: the reference lets the caption
-#: run almost to the frame edge, well past where DEFAULT_CARD_WIDTH_RATIO
-#: (measured off the *other* reference, the "card" style's) would cap it.
-#: Reference: ~46 / 900.
-BAR_RIGHT_MARGIN_RATIO = 0.051
+#: Width of the "bar" style's caption box (scrim + accent bar), as a fraction
+#: of frame width - fixed, not derived from a right-edge margin. Unlike
+#: "card" - a discrete rectangle that reads as intentional only with an even
+#: margin on both sides, hence sharing SIDE_MARGIN_RATIO left and right -
+#: "bar" has no rectangle to balance, so it stretches out from the shared left
+#: margin to a wide fixed fraction of the frame instead of stopping at
+#: DEFAULT_CARD_WIDTH_RATIO (measured off the *other* reference, the "card"
+#: style's, and much narrower).
+BAR_WIDTH_RATIO = 0.80
 
 #: A scrim behind the caption, standing in for the "card": solid `BAR_CARD_COLOR`
 #: at `BAR_CARD_OPACITY` next to the accent bar, fading horizontally to fully

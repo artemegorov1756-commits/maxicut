@@ -59,22 +59,38 @@ margin, but nothing else ties their positions together - the logo's top edge
 is a fixed fraction of frame height (`LOGO_TOP_RATIO`) instead of following
 the caption up and down as the line count changes.
 
+Like `card` (see below), the `bar` scrim + accent bar don't shrink-wrap to
+the actual line count: the box is always sized as if the title used all
+`MAX_TITLE_LINES` lines, landing at a fixed ~18% of frame height
+(`BAR_FONT_RATIO`). A one- or two-line title's text is simply centred inside
+that fixed box instead of the box shrinking down with it. `bar` also anchors
+`--position` a little higher than `card` does (`BAR_POSITION_RATIO` vs.
+`DEFAULT_POSITION_RATIO`), since the box no longer shrinks to sit closer to
+the bottom on short titles.
+
 Either style is removed by `--no-box` (drops the card, or the bar - the
 caption's own stroke + shadow is what's left).
 
-**The type size is fixed and the card grows to fit it**, which is the inverse
-of what this used to do. `--font-ratio` sets the size as a fraction of
-`min(width, height)` and `--card-width` sets the card's width as a fraction of
-frame width; the title wraps inside that width onto at most `MAX_TITLE_LINES`
-(3) lines, and the card's *height* follows from the line count. A short title
-and a long one therefore render at the same size, where the old grow-to-fill
-behaviour would have set one huge and the other small.
+**The type size is fixed**, which is the inverse of what this used to do.
+`--font-ratio` sets the size as a fraction of `min(width, height)` and
+`--card-width` sets the card's width as a fraction of frame width; the title
+wraps inside that width onto at most `MAX_TITLE_LINES` (3) lines. A short
+title and a long one therefore render at the same size, where the old
+grow-to-fill behaviour would have set one huge and the other small.
 
-Card height is computed from font metrics (ascent + descent + leading per
+Neither style's box grows or shrinks with the line count any more: both
+`card` and `bar` are pinned at `MAX_TITLE_LINES` lines' worth of height
+regardless of how many lines the title actually uses (see the note above).
+`card`'s width is likewise fixed at `--card-width` (default
+`DEFAULT_CARD_WIDTH_RATIO`, ~80% of frame width) rather than being sized to
+the text, stretched out from the shared left margin toward the frame's right
+edge the same way `bar`'s box is (see `textfit.card_width`).
+
+Card/box height is computed from font metrics (ascent + descent + leading per
 line), not from the rendered bitmap, so two titles that wrap to the same number
 of lines always get identically sized cards - a bitmap measurement would make
 the card shrink whenever a title happened to contain no descender or accent.
-The text ink is then centred inside that card.
+The text ink is then centred inside that card/box.
 
 `--position` is the card's **top** edge, not its centre, because the logo
 hangs off the top of the card: anchoring by the centre would shove the logo up
@@ -97,8 +113,8 @@ filled lockup that already carries the brand's lime, and repainting it would
 flatten the knockout text while a rule would just double up on the fill.
 `--logo-color` overrides either way, `--no-logo-color` opts out entirely.
 
-`Brand.style` picks the lockup layout - `card` for `ups`/`post_id`, `bar` for
-`whatsup`. See "The design" above.
+`Brand.style` picks the lockup layout - `card` for `post_id`, `bar` for
+`whatsup`/`ups`. See "The design" above.
 
 ## How it's organised
 
