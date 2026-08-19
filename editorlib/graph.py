@@ -264,10 +264,10 @@ def build(
         has to fit into grows a little, which a single scale factor misses.
         """
         lay = layout_for(width, height, size, args.line_gap)
-        # A card supplies its own contrast; the bar style sits the title
-        # directly on footage (like the no-box path) so it needs the same
-        # stroke to hold up against busy backgrounds.
-        pen = 0 if use_card else lay.stroke_width
+        # The card and the bar's scrim both supply their own contrast, and
+        # the boxless path matches the reference's plain flat glyphs too -
+        # no path draws a stroke around the letters any more.
+        pen = 0
         if use_card:
             room = max(1, card_width(width, args.card_width, lay.side_margin) - 2 * lay.card_pad_x)
         elif use_bar:
@@ -389,37 +389,25 @@ def build(
         nxt = g.label("t")
         g.chain([t, card_in], _overlay(card_x, card_y), [nxt])
         t = nxt
-    else:
-        # Off the card path the text sits directly on the footage and needs
-        # its own contrast - a drop shadow behind the glyphs, plus (on "bar")
-        # a solid accent bar to their left.
-        if use_bar:
-            scrim_img = assets.build_gradient_card_image(
-                card_w, card_h, BAR_CARD_COLOR, BAR_CARD_OPACITY, BAR_CARD_FADE_POWER
-            )
-            scrim_in = g.add_image_input(save_png(scrim_img, "scrim.png"))
-            nxt = g.label("t")
-            g.chain([t, scrim_in], _overlay(card_x, card_y), [nxt])
-            t = nxt
-
-            bar_img = assets.build_card_image(bar_w, card_h, brand.color, 1.0)
-            bar_in = g.add_image_input(save_png(bar_img, "bar.png"))
-            nxt = g.label("t")
-            g.chain([t, bar_in], _overlay(card_x, card_y), [nxt])
-            t = nxt
-
-        text_alpha = np.asarray(text_img.getchannel("A"), dtype=np.float32) / 255.0
-        shadow_img, shadow_pad = assets.soft_shadow_from_alpha(
-            text_alpha, max(2, round(layout.font_size * 0.30)), 0.55
+    elif use_bar:
+        # The scrim + accent bar supply the contrast on this path, so the
+        # glyphs sit straight on top with no halo - matching the reference.
+        scrim_img = assets.build_gradient_card_image(
+            card_w, card_h, BAR_CARD_COLOR, BAR_CARD_OPACITY, BAR_CARD_FADE_POWER
         )
-        shadow_in = g.add_image_input(save_png(shadow_img, "text_shadow.png"))
+        scrim_in = g.add_image_input(save_png(scrim_img, "scrim.png"))
         nxt = g.label("t")
-        g.chain(
-            [t, shadow_in],
-            _overlay(text_x - shadow_pad, text_y - shadow_pad),
-            [nxt],
-        )
+        g.chain([t, scrim_in], _overlay(card_x, card_y), [nxt])
         t = nxt
+
+        bar_img = assets.build_card_image(bar_w, card_h, brand.color, 1.0)
+        bar_in = g.add_image_input(save_png(bar_img, "bar.png"))
+        nxt = g.label("t")
+        g.chain([t, bar_in], _overlay(card_x, card_y), [nxt])
+        t = nxt
+    # The boxless path sits text directly on raw footage with nothing else
+    # supplying contrast - the reference still shows plain flat glyphs there,
+    # with no shadow or stroke.
 
     text_in = g.add_image_input(save_png(text_img, "text.png"))
     nxt = g.label("t")

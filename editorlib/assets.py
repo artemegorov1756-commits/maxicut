@@ -20,7 +20,7 @@ import platform
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 from .constants import (
     BUNDLED_FONT,
@@ -230,30 +230,6 @@ def build_subliminal_frame(path: Path, width: int, height: int, ratio: float) ->
     frame = Image.new("RGB", (width, height), SUBLIMINAL_BG)
     frame.paste(logo, ((width - logo_w) // 2, (height - logo_h) // 2), logo)
     return frame
-
-
-# --------------------------------------------------------------------------- #
-# Soft drop shadow - the --no-box path only, where text sits on raw footage.
-# On the card path the card itself supplies the contrast, and the reference
-# shows no halo around the glyphs.
-# --------------------------------------------------------------------------- #
-
-
-def soft_shadow_from_alpha(alpha: np.ndarray, blur: int, opacity: float) -> tuple[Image.Image, int]:
-    """A soft dark halo from an alpha mask, e.g. text ink.
-
-    Returns (RGBA black image, padding added on every side - subtract it from
-    the ink's own position to keep the two in register).
-    """
-    pad = max(1, blur * 2)
-    canvas = np.zeros((alpha.shape[0] + 2 * pad, alpha.shape[1] + 2 * pad), dtype=np.float32)
-    canvas[pad : pad + alpha.shape[0], pad : pad + alpha.shape[1]] = alpha
-    blurred = Image.fromarray((canvas * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(blur))
-    shadow_alpha = np.asarray(blurred, dtype=np.float32) / 255.0 * opacity
-
-    rgba = np.zeros((*shadow_alpha.shape, 4), dtype=np.uint8)
-    rgba[..., 3] = np.clip(shadow_alpha * 255, 0, 255).astype(np.uint8)
-    return Image.fromarray(rgba, mode="RGBA"), pad
 
 
 # --------------------------------------------------------------------------- #
