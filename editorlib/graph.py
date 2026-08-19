@@ -1,11 +1,12 @@
 """Assemble one ffmpeg -filter_complex graph that composites the title lockup.
 
 Every layer is an ffmpeg `overlay` of a *static* PNG that Python drew once
-with PIL - card, text, logo - each stacked onto its own transparent full-frame
-canvas, then overlaid on the footage. Card + text share one fade envelope and
-disappear together after `--duration`; the logo gets its own envelope that
-fades in on the same cue but never fades out, so it stays on screen for the
-rest of the video instead of vanishing with the title.
+with PIL - card, text, logo, credit line - each stacked onto its own
+transparent full-frame canvas, then overlaid on the footage. Card + text
+share one fade envelope and disappear together after `--duration`; the logo
+and the video-source credit line each get their own envelope that fades in
+on the same cue but never fades out, so they stay on screen for the rest of
+the video instead of vanishing with the title.
 
 This used to be considerably more involved. The card was a liquid-glass panel,
 which meant splitting the source, cropping the region under the card, running
@@ -37,6 +38,8 @@ from .constants import (
     BAR_CARD_FADE_POWER,
     BAR_CARD_OPACITY,
     BAR_WIDTH_RATIO,
+    CREDIT_FONT_RATIO,
+    CREDIT_GAP_RATIO,
     LOGO_CARD_GAP_RATIO,
     LOGO_TOP_RATIO,
     MAX_TITLE_LINES,
@@ -450,6 +453,61 @@ def build(
     after_title = g.label("aftertitle")
     g.chain([video_main, t], _overlay(enable=enable), [after_title])
     cur = after_title
+
+    # ----------------------------------------------------------------- #
+    # Video-source credit line: a small "Video: Channel/Platform" tag
+    # tucked under the title block, in a regular (non-bold) system font -
+    # plain text, no background box. Composited on its own transparent
+    # canvas with its own fade envelope, the same way the logo is: it fades
+    # in on the title's cue but does NOT fade out with it, so it stays on
+    # screen for the rest of the video instead of disappearing with the
+    # title.
+    # ----------------------------------------------------------------- #
+    if args.video_source:
+        credit_text = f"Video: {args.video_source.strip()}"
+        credit_font_size = max(MIN_FONT_SIZE, round(min(width, height) * CREDIT_FONT_RATIO))
+        credit_font = assets.resolve_credit_font()
+        if credit_font is None:
+            credit_font = font
+            log.append(
+                "      note: no regular-weight system font found for the credit line, "
+                "falling back to the title's own font"
+            )
+        credit_text_img = assets.render_text_image(
+            credit_text, credit_font, credit_font_size, 0, 0, align="left"
+        )
+
+        credit_x = layout.side_margin
+        credit_y = card_y + card_h + max(1, round(height * CREDIT_GAP_RATIO))
+        credit_y = min(credit_y, max(0, height - layout.bottom_margin - credit_text_img.height))
+
+        credit_canvas = g.add_lavfi_input(
+            f"color=c=black@0.0:s={width}x{height}:r={info.fps}:d={info.duration + 1.0:.3f},format=rgba"
+        )
+        credit_text_in = g.add_image_input(save_png(credit_text_img, "credit_text.png"))
+        credit_t = g.label("creditt")
+        g.chain([credit_canvas, credit_text_in], _overlay(credit_x, credit_y), [credit_t])
+
+        if fade > 0:
+            credit_faded = g.label("creditfaded")
+            g.chain(
+                [credit_t],
+                f"fade=t=in:st={args.start:.6f}:d={fade:.6f}:alpha=1",
+                [credit_faded],
+            )
+            credit_t = credit_faded
+            credit_enable = None
+        else:
+            credit_enable = f"gte(t,{args.start:.6f})"
+
+        after_credit = g.label("aftercredit")
+        g.chain([cur, credit_t], _overlay(enable=credit_enable), [after_credit])
+        cur = after_credit
+
+        log.append(
+            f"      credit \"{credit_text}\" {credit_text_img.width}x{credit_text_img.height} px "
+            f"at ({credit_x}, {credit_y}) - visible from {args.start:.2f}s to the end of the video"
+        )
 
     # ----------------------------------------------------------------- #
     # Logo lockup - fades in with the title (same start/fade window) but,

@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .constants import (
     BUNDLED_FONT,
+    CREDIT_FONT_CANDIDATES,
     FFMPEG_INSTALL_HINTS,
     FONT_CANDIDATES,
     LOGO_MAX_HEIGHT_RATIO,
@@ -64,6 +65,19 @@ def resolve_font(explicit: str | None) -> str:
         "No default font found on this system. Pass one explicitly, e.g.\n"
         "  --font /path/to/YourFont.ttf"
     )
+
+
+def resolve_credit_font() -> str | None:
+    """A regular-weight system font for the video-source credit line.
+
+    Unlike `resolve_font`, there is no bundled fallback - fonts/ only ships
+    bold display weights - so this returns None (letting the caller fall
+    back to the title's own font) when the OS has none of these installed.
+    """
+    for candidate in CREDIT_FONT_CANDIDATES.get(platform.system(), CREDIT_FONT_CANDIDATES["Linux"]):
+        if Path(candidate).is_file():
+            return candidate
+    return None
 
 
 def resolve_logo(explicit: str | None, disabled: bool, default: Path) -> Path | None:

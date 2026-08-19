@@ -8,6 +8,7 @@ change, encode) runs as a single ffmpeg `-filter_complex` graph.
 python ffmpeg_editor.py clip.mp4 "Dr. Ada Lovelace" -o titled.mp4
 python ffmpeg_editor.py clip.mp4 "Same Day Delivery" --brand ups
 python ffmpeg_editor.py https://example.com/clip.mp4 "Live from Berlin"
+python ffmpeg_editor.py clip.mp4 "9 Months on the Front Line" --video-source DmitriyGrinich1/X
 ```
 
 Requires `ffmpeg` and `ffprobe` on `PATH` (a build with `libx264`; add
@@ -95,6 +96,20 @@ The text ink is then centred inside that card/box.
 `--position` is the card's **top** edge, not its centre, because the logo
 hangs off the top of the card: anchoring by the centre would shove the logo up
 and down the frame every time the line count changed.
+
+### Video-source credit
+
+`--video-source CHANNEL/PLATFORM` (e.g. `--video-source DmitriyGrinich1/X`)
+burns in a small `Video: CHANNEL/PLATFORM` line under the title block - plain
+text, no background box, set in a regular (non-bold) system font rather than
+the title's bold display type (`assets.resolve_credit_font`; falls back to
+the title's own font if the OS has none of the regular-weight candidates in
+`CREDIT_FONT_CANDIDATES`). It shares the left margin with the card/logo
+(`SIDE_MARGIN_RATIO`), but not the card/title's fade envelope: like the logo,
+it fades in on the title's cue and then stays on screen for the rest of the
+video instead of disappearing when the title fades out. Omitted entirely
+when the flag isn't passed. Tunables live in `constants.py`
+(`CREDIT_FONT_RATIO`, `CREDIT_GAP_RATIO`, `CREDIT_FONT_CANDIDATES`).
 
 ### Brands
 

@@ -223,6 +223,43 @@ BAR_CARD_OPACITY = 0.55
 BAR_CARD_FADE_POWER = 1.6
 
 # --------------------------------------------------------------------------- #
+# Video-source credit line
+# --------------------------------------------------------------------------- #
+
+#: Type size for the small "Video: Channel/Platform" credit line, as a
+#: fraction of min(width, height) - a footnote under the title block, not
+#: another caption, so it sits well below BAR_FONT_RATIO/DEFAULT_FONT_RATIO.
+CREDIT_FONT_RATIO = 0.035
+
+#: Gap between the bottom of the title block (card, scrim, or the --no-box
+#: text) and the top of the credit line, as a fraction of frame height.
+CREDIT_GAP_RATIO = 0.045
+
+#: Regular (non-bold) system fonts for the credit line - it should read as a
+#: quiet footnote, not compete with the title's bold display type. Nothing
+#: bundled in fonts/ ships a regular weight (Stem-Medium and HeliosExtC-Bold
+#: are both heavy), so this always falls back to whatever the OS provides;
+#: if none of these exist, the credit line falls back to the title's own font
+#: (see assets.resolve_credit_font).
+CREDIT_FONT_CANDIDATES = {
+    "Windows": [
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+    ],
+    "Darwin": [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+    ],
+    "Linux": [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ],
+}
+
+# --------------------------------------------------------------------------- #
 # Subliminal flashes
 # --------------------------------------------------------------------------- #
 

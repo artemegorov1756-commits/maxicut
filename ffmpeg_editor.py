@@ -132,6 +132,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--no-caps", action="store_true", help="keep the title's own capitalisation")
     parser.add_argument(
+        "--video-source", metavar="CHANNEL/PLATFORM",
+        help="burn in a small 'Video: CHANNEL/PLATFORM' credit line below the title "
+        "(e.g. --video-source DmitriyGrinich1/X); omitted by default",
+    )
+    parser.add_argument(
         "--brand", choices=sorted(BRANDS), default=DEFAULT_BRAND,
         help="which logo to burn in, and the colour that goes with it: "
         + ", ".join(
@@ -254,6 +259,8 @@ def resolve_logo_color(args, brand) -> tuple[int, int, int] | None:
 def run(args: argparse.Namespace) -> int:
     if not args.title.strip():
         raise TitleMakerError("Title text is empty.")
+    if args.video_source is not None and not args.video_source.strip():
+        raise TitleMakerError("--video-source was passed but is empty.")
     brand = BRANDS[args.brand]
     font_ratio = args.font_ratio
     if font_ratio is None:
