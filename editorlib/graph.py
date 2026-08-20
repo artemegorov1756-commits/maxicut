@@ -165,6 +165,7 @@ def build(
     position: float,
     brand,
     logo_color: tuple[int, int, int] | None,
+    logo_opacity: float,
     logo_path: Path | None,
     subliminal_path: Path | None,
     speed: float,
@@ -522,9 +523,9 @@ def build(
         logo_img = assets.build_logo_image(
             logo_path, width, height, args.logo_ratio, logo_color, brand.wordmark
         )
-        if args.logo_opacity < 1.0:
+        if logo_opacity < 1.0:
             faded_alpha = (
-                np.asarray(logo_img.getchannel("A"), dtype=np.float32) * args.logo_opacity
+                np.asarray(logo_img.getchannel("A"), dtype=np.float32) * logo_opacity
             )
             logo_img = Image.fromarray(
                 np.dstack(

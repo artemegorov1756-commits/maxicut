@@ -120,16 +120,25 @@ Each brand is a logo plus the colour that goes with it:
 | `whatsup` (default) | `#c7f62e` | `public/whatsup_logo.png` |
 | `ups` | `#ffcc00` | `public/ups_logo.png` |
 | `post_id` | `#fdcf09` | `public/post_id_logo.png` |
+| `frt` | `#fb7f01` | `public/FRT_info.png` |
 
 `Brand.wordmark` decides how the colour is used. A wordmark logo is
 monochrome artwork, so it gets repainted in the brand colour and picks up the
 accent rule beneath it. `whatsup` sets `wordmark=False`: its artwork is a
 filled lockup that already carries the brand's lime, and repainting it would
 flatten the knockout text while a rule would just double up on the fill.
-`--logo-color` overrides either way, `--no-logo-color` opts out entirely.
+`frt` also sets `wordmark=False`: its logo stays its own (white) colour
+rather than being repainted `#fb7f01` - only the caption's accent bar picks
+up the brand colour, since that's driven by `Brand.color` directly regardless
+of `wordmark` (see `graph.build`). `--logo-color` overrides either way,
+`--no-logo-color` opts out entirely.
 
-`Brand.style` picks the lockup layout - `card` for `post_id`, `bar` for
-`whatsup`/`ups`. See "The design" above.
+`Brand.style` picks the lockup layout - `card` for `post_id`/`ups`, `bar` for
+`whatsup`/`frt`. See "The design" above.
+
+`Brand.opacity` overrides `DEFAULT_LOGO_OPACITY` for a single brand's logo;
+`frt` sets it to `0.5` so its logo sits semi-transparent over the footage.
+`--logo-opacity` overrides either way.
 
 ## How it's organised
 

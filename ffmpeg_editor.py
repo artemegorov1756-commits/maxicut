@@ -151,8 +151,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"logo width as a fraction of frame width (default: {DEFAULT_LOGO_RATIO})",
     )
     parser.add_argument(
-        "--logo-opacity", type=float, default=DEFAULT_LOGO_OPACITY, metavar="A",
-        help=f"how solid the logo sits over the footage, 0-1 (default: {DEFAULT_LOGO_OPACITY:g})",
+        "--logo-opacity", type=float, default=None, metavar="A",
+        help=f"how solid the logo sits over the footage, 0-1 (default: {DEFAULT_LOGO_OPACITY:g}, "
+        "unless the brand sets its own)",
     )
     parser.add_argument(
         "--logo-color", type=assets.parse_color, default=None, metavar="RGB",
@@ -256,6 +257,17 @@ def resolve_logo_color(args, brand) -> tuple[int, int, int] | None:
     return brand.color if brand.wordmark else None
 
 
+def resolve_logo_opacity(args, brand) -> float:
+    """How solid the logo sits over the footage.
+
+    An explicit --logo-opacity always wins; otherwise a brand's own opacity
+    applies, falling back to DEFAULT_LOGO_OPACITY when neither is set.
+    """
+    if args.logo_opacity is not None:
+        return args.logo_opacity
+    return brand.opacity if brand.opacity is not None else DEFAULT_LOGO_OPACITY
+
+
 def run(args: argparse.Namespace) -> int:
     if not args.title.strip():
         raise TitleMakerError("Title text is empty.")
@@ -280,7 +292,8 @@ def run(args: argparse.Namespace) -> int:
         raise TitleMakerError("--line-gap must be between 0 and 3.")
     if not 0 < args.logo_ratio <= 1:
         raise TitleMakerError("--logo-ratio must be between 0 and 1.")
-    if not 0 <= args.logo_opacity <= 1:
+    logo_opacity = resolve_logo_opacity(args, brand)
+    if not 0 <= logo_opacity <= 1:
         raise TitleMakerError("--logo-opacity must be between 0 and 1.")
     if any(not 0 <= at < 1 for at in args.subliminal_at):
         raise TitleMakerError("--subliminal-at takes fractions of the duration, 0 <= R < 1.")
@@ -350,6 +363,7 @@ def run(args: argparse.Namespace) -> int:
             position=position,
             brand=brand,
             logo_color=logo_color,
+            logo_opacity=logo_opacity,
             logo_path=logo_path,
             subliminal_path=subliminal_path,
             speed=speed,

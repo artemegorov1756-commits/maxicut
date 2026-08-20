@@ -126,12 +126,17 @@ class Brand:
     #: near the top of the frame independent of the caption's position.
     #: Reference: `whatsup_new_video_design.jpg`.
     style: str = "card"
+    #: Overrides DEFAULT_LOGO_OPACITY for this brand's logo when set; still
+    #: overridden in turn by an explicit --logo-opacity. None defers to the
+    #: global default.
+    opacity: float | None = None
 
 
 BRANDS = {
     "whatsup": Brand(PUBLIC_DIR / "whatsup_logo.png", (199, 246, 46), wordmark=False, style="bar"),
     "ups": Brand(PUBLIC_DIR / "ups_logo.png", (255, 204, 0)),
     "post_id": Brand(PUBLIC_DIR / "post_id_logo.png", (253, 207, 9)),
+    "frt": Brand(PUBLIC_DIR / "FRT_info.png", (251, 127, 1), wordmark=False, style="bar", opacity=0.5),
 }
 
 DEFAULT_BRAND = "whatsup"
